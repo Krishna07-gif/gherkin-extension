@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,261 +8,288 @@
 </head>
 <body>
 
-  <!-- ══════════════════════ HEADER ══════════════════════ -->
+  <!-- ── HEADER ─────────────────────────────────────────── -->
   <header class="header">
     <div class="header-brand">
-      <div class="brand-icon">🧪</div>
-      <div class="brand-text">
-        <span class="brand-name">Gherkin Recorder</span>
-        <span class="brand-sub">BDD Test Generator</span>
-      </div>
+      <div class="brand-orb" id="statusOrb"></div>
+      <span class="brand-name">Gherkin</span>
     </div>
-    <div class="status-badge" id="statusBadge">
-      <span class="status-dot"></span>
-      <span class="status-text" id="statusText">IDLE</span>
+    <div class="header-right">
+      <div class="status-pill" id="statusPill">IDLE</div>
+      <button class="theme-toggle" id="btnTheme" title="Toggle dark/light mode">
+        <span id="themeIcon">🌙</span>
+      </button>
     </div>
   </header>
 
-  <!-- ══════════════════════ CONTROLS ══════════════════════ -->
-  <div class="controls-bar">
-    <button class="ctrl-btn start-btn" id="btnStart" title="Start Recording">
-      <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
-      <span>Start</span>
+  <!-- ── RECORD ORB ─────────────────────────────────────── -->
+  <div class="orb-zone">
+    <div class="orb-ring" id="orbRing">
+      <button class="record-orb" id="btnStart" title="Start recording">
+        <span class="orb-icon" id="orbIcon">⏺</span>
+      </button>
+    </div>
+    <div class="orb-label" id="orbLabel">Click to Record</div>
+  </div>
+
+  <!-- ── SECONDARY CONTROLS ─────────────────────────────── -->
+  <div class="sec-controls" id="secControls">
+    <button class="sec-btn" id="btnPause" disabled>
+      <span class="sec-icon">⏸</span><span>Pause</span>
     </button>
-    <button class="ctrl-btn pause-btn" id="btnPause" disabled title="Pause Recording">
-      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-      <span>Pause</span>
+    <button class="sec-btn danger" id="btnStop" disabled>
+      <span class="sec-icon">⏹</span><span>Stop</span>
     </button>
-    <button class="ctrl-btn stop-btn" id="btnStop" disabled title="Stop Recording">
-      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16"/></svg>
-      <span>Stop</span>
+    <button class="sec-btn" id="btnClear">
+      <span class="sec-icon">🗑</span><span>Clear</span>
     </button>
-    <button class="ctrl-btn clear-btn" id="btnClear" title="Clear All Steps">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-      <span>Clear</span>
-    </button>
-    <button class="ctrl-btn video-btn" id="btnVideoRecord" title="Record Video of this tab session">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14v-4z"/><rect x="2" y="6" width="13" height="12" rx="2"/></svg>
-      <span id="videoBtnLabel">Video</span>
+    <button class="sec-btn video" id="btnVideoRecord">
+      <span class="sec-icon">🎬</span><span id="videoBtnLabel">Video</span>
     </button>
   </div>
 
-  <!-- ══════════════════════ STATS BAR ══════════════════════ -->
-  <div class="stats-bar">
-    <div class="stat-item">
-      <span class="stat-icon">📍</span>
-      <span id="stepCountLabel">0 steps recorded</span>
-    </div>
-    <div class="stat-item">
-      <span class="stat-icon">⏱</span>
-      <span id="timerLabel">00:00</span>
-    </div>
-    <div class="stat-item" id="pausedBadge" style="display:none">
-      <span class="paused-chip">⏸ PAUSED</span>
-    </div>
-    <div class="stat-item" id="videoBadge" style="display:none">
-      <span class="video-chip">⏺ REC VIDEO</span>
-    </div>
+  <!-- ── STATS STRIP ────────────────────────────────────── -->
+  <div class="stats-strip" id="statsStrip">
+    <span class="stat"><span class="stat-icon">📍</span><span id="stepCountLabel">0 steps</span></span>
+    <span class="stat-sep">·</span>
+    <span class="stat"><span class="stat-icon">⏱</span><span id="timerLabel">00:00</span></span>
+    <span class="chip paused-chip" id="pausedBadge" style="display:none">⏸ PAUSED</span>
+    <span class="chip video-chip" id="videoBadge" style="display:none">⏺ REC</span>
   </div>
 
-  <!-- Video preview panel — shown after recording stops -->
+  <!-- ── VIDEO PREVIEW ──────────────────────────────────── -->
   <div class="video-preview-panel" id="videoPreviewPanel" style="display:none">
     <div class="video-preview-header">
-      <span class="video-preview-title">🎬 Recorded Video</span>
-      <div style="display:flex;gap:6px;align-items:center">
+      <span>🎬 Recorded Session</span>
+      <div style="display:flex;align-items:center;gap:6px">
         <span class="video-size-label" id="videoSizeLabel"></span>
-        <button class="action-btn" id="btnVideoDownload">💾 Download</button>
-        <button class="video-discard-btn" id="btnVideoDiscard" title="Discard video">✕</button>
+        <button class="pill-btn" id="btnVideoDownload">💾 Download</button>
+        <button class="icon-only-btn" id="btnVideoDiscard">✕</button>
       </div>
     </div>
     <video id="videoPlayer" controls playsinline></video>
   </div>
 
-  <!-- ══════════════════════ TABS ══════════════════════ -->
-  <nav class="tabs-nav">
-    <button class="tab-btn active" data-tab="record">
-      <span>🎬</span> Record
+  <!-- ── TAB BAR (bottom) ───────────────────────────────── -->
+  <nav class="tab-bar">
+    <button class="tab-item active" data-tab="record">
+      <span class="tab-icon">🎬</span><span class="tab-label">Record</span>
     </button>
-    <button class="tab-btn" data-tab="gherkin">
-      <span>📄</span> Gherkin
+    <button class="tab-item" data-tab="gherkin">
+      <span class="tab-icon">📄</span><span class="tab-label">Gherkin</span>
     </button>
-    <button class="tab-btn" data-tab="saved">
-      <span>💾</span> Saved
+    <button class="tab-item" data-tab="export">
+      <span class="tab-icon">🚀</span><span class="tab-label">Export</span>
     </button>
-    <button class="tab-btn" data-tab="settings">
-      <span>⚙️</span> Settings
+    <button class="tab-item" data-tab="saved">
+      <span class="tab-icon">💾</span><span class="tab-label">Saved</span>
+    </button>
+    <button class="tab-item" data-tab="settings">
+      <span class="tab-icon">⚙️</span><span class="tab-label">Settings</span>
     </button>
   </nav>
 
-  <!-- ══════════════════════ TAB: RECORD ══════════════════════ -->
+  <!-- ── TAB: RECORD ────────────────────────────────────── -->
   <div class="tab-panel active" id="tab-record">
-
-    <!-- Search / filter steps -->
-    <div class="steps-toolbar">
-      <input type="text" id="stepSearch" class="search-input" placeholder="🔍  Filter steps..." />
-      <button class="icon-btn" id="btnAddAssert" title="Add manual assertion">
-        ✅ Assert
-      </button>
+    <div class="panel-toolbar">
+      <input type="text" id="stepSearch" class="search-box" placeholder="🔍  Filter steps…" />
+      <button class="pill-btn" id="btnAddAssert">✅ Assert</button>
     </div>
-
-    <!-- Steps list -->
     <div class="steps-list" id="stepsList">
       <div class="empty-state" id="emptyState">
         <div class="empty-icon">🎬</div>
         <p class="empty-title">Ready to Record</p>
-        <p class="empty-desc">Click <strong>Start</strong> then interact with any web page. Every click, type, and navigation will be captured.</p>
+        <p class="empty-desc">Click the orb above then interact with any web page. Every action is captured here in real time.</p>
       </div>
     </div>
-
   </div>
 
-  <!-- ══════════════════════ TAB: GHERKIN ══════════════════════ -->
+  <!-- ── TAB: GHERKIN ───────────────────────────────────── -->
   <div class="tab-panel" id="tab-gherkin">
-
-    <div class="gherkin-config">
-      <div class="field-row">
+    <div class="form-grid">
+      <div class="field">
         <label class="field-label">Feature Name</label>
-        <input type="text" id="featureName" class="text-input" value="My Feature" placeholder="e.g. User Authentication" />
+        <input type="text" id="featureName" class="field-input" value="My Feature" placeholder="User Authentication" />
       </div>
-      <div class="field-row">
+      <div class="field">
         <label class="field-label">Scenario Name</label>
-        <input type="text" id="scenarioName" class="text-input" value="My Scenario" placeholder="e.g. Successful login" />
+        <input type="text" id="scenarioName" class="field-input" value="My Scenario" placeholder="Successful login" />
       </div>
-      <div class="field-row">
-        <label class="field-label">Tags <span class="field-hint">(optional)</span></label>
-        <input type="text" id="tagsInput" class="text-input" placeholder="e.g. @smoke @regression" />
+      <div class="field">
+        <label class="field-label">Tags <span class="muted">(optional)</span></label>
+        <input type="text" id="tagsInput" class="field-input" placeholder="@smoke @regression" />
       </div>
-
-      <div class="gherkin-options">
-        <label class="toggle-label">
+      <div class="toggle-row">
+        <label class="toggle-wrap">
           <input type="checkbox" id="optDedupe" checked />
-          <span class="toggle-slider"></span>
-          <span>Remove duplicate steps</span>
+          <span class="tog"></span>
+          <span>Deduplicate steps</span>
         </label>
-        <label class="toggle-label">
+        <label class="toggle-wrap">
           <input type="checkbox" id="optSmartNav" checked />
-          <span class="toggle-slider"></span>
+          <span class="tog"></span>
           <span>Smart URL names</span>
         </label>
       </div>
     </div>
-
-    <!-- Output -->
-    <div class="gherkin-output-section">
-      <div class="gherkin-output-header">
-        <span class="output-title">Generated Feature File</span>
+    <div class="output-panel">
+      <div class="output-header">
+        <span class="output-title">Feature File</span>
         <div class="output-actions">
-          <button class="action-btn" id="btnRefresh" title="Regenerate">🔄</button>
-          <button class="action-btn" id="btnCopy">📋 Copy</button>
-          <button class="action-btn" id="btnDownload">💾 .feature</button>
-          <button class="action-btn save-action-btn" id="btnSaveScenario">🗂 Save</button>
+          <button class="pill-btn" id="btnRefresh">🔄</button>
+          <button class="pill-btn" id="btnCopy">📋 Copy</button>
+          <button class="pill-btn" id="btnDownload">💾 .feature</button>
+          <button class="pill-btn accent" id="btnSaveScenario">🗂 Save</button>
         </div>
       </div>
-      <pre class="gherkin-code" id="gherkinOutput"><span class="placeholder-text">Start recording to generate Gherkin output...</span></pre>
+      <pre class="code-output" id="gherkinOutput"><span class="muted">Start recording to generate Gherkin…</span></pre>
     </div>
-
   </div>
 
-  <!-- ══════════════════════ TAB: SAVED ══════════════════════ -->
-  <div class="tab-panel" id="tab-saved">
-
-    <div class="saved-header">
-      <h3 class="saved-title">Saved Scenarios</h3>
-      <button class="action-btn" id="btnExportAll">📦 Export All</button>
+  <!-- ── TAB: EXPORT ────────────────────────────────────── -->
+  <div class="tab-panel" id="tab-export">
+    <div class="export-header">
+      <div class="export-title-row">
+        <span class="output-title">Export Format</span>
+        <select id="exportFormat" class="field-input select-sm">
+          <option value="playwright">Playwright (TypeScript)</option>
+          <option value="cypress">Cypress</option>
+          <option value="selenium">Selenium (Python)</option>
+          <option value="json">Raw JSON</option>
+        </select>
+      </div>
     </div>
+    <div class="output-panel flex1">
+      <div class="output-header">
+        <span class="output-title" id="exportOutputTitle">Playwright Code</span>
+        <div class="output-actions">
+          <button class="pill-btn" id="btnExportRefresh">🔄</button>
+          <button class="pill-btn" id="btnExportCopy">📋 Copy</button>
+          <button class="pill-btn" id="btnExportDownload">💾 Download</button>
+        </div>
+      </div>
+      <pre class="code-output" id="exportOutput"><span class="muted">Select a format and generate…</span></pre>
+    </div>
+    <!-- Variable detection hints -->
+    <div class="var-hints" id="varHints" style="display:none">
+      <div class="var-hints-title">🎯 Dynamic Values Detected</div>
+      <div id="varHintsList"></div>
+    </div>
+  </div>
 
+  <!-- ── TAB: SAVED ─────────────────────────────────────── -->
+  <div class="tab-panel" id="tab-saved">
+    <div class="saved-header">
+      <span class="output-title">Saved Scenarios</span>
+      <div style="display:flex;gap:6px">
+        <button class="pill-btn" id="btnExportAll">📦 Export All</button>
+      </div>
+    </div>
     <div id="savedList" class="saved-list">
       <div class="empty-state">
         <div class="empty-icon">💾</div>
         <p class="empty-title">No Saved Scenarios</p>
-        <p class="empty-desc">Record and generate Gherkin, then click <strong>Save</strong> to store scenarios here.</p>
+        <p class="empty-desc">Record and save scenarios here for later use or export.</p>
       </div>
     </div>
-
   </div>
 
-  <!-- ══════════════════════ TAB: SETTINGS ══════════════════════ -->
+  <!-- ── TAB: SETTINGS ──────────────────────────────────── -->
   <div class="tab-panel" id="tab-settings">
-
-    <div class="settings-section">
-      <h4 class="settings-heading">Recording</h4>
-
-      <label class="toggle-label setting-row">
-        <div class="setting-info">
-          <span class="setting-name">Record Right-Click Assertions</span>
-          <span class="setting-desc">Right-click on elements to add Then assertions</span>
+    <div class="settings-group">
+      <div class="settings-group-title">Recording</div>
+      <label class="setting-row">
+        <div>
+          <span class="setting-name">Screenshot per step</span>
+          <span class="setting-desc">Capture tab screenshot at each interaction</span>
         </div>
-        <input type="checkbox" id="settingRightClick" checked />
-        <span class="toggle-slider"></span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="settingScreenshots" checked />
+          <span class="tog"></span>
+        </div>
       </label>
-
-      <label class="toggle-label setting-row">
-        <div class="setting-info">
-          <span class="setting-name">Record Keyboard Shortcuts</span>
+      <label class="setting-row">
+        <div>
+          <span class="setting-name">Record scroll events</span>
+          <span class="setting-desc">Track significant page scrolls (>200px)</span>
+        </div>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="settingScrolls" />
+          <span class="tog"></span>
+        </div>
+      </label>
+      <label class="setting-row">
+        <div>
+          <span class="setting-name">Record keyboard shortcuts</span>
           <span class="setting-desc">Capture Ctrl+S, Ctrl+Z etc.</span>
         </div>
-        <input type="checkbox" id="settingHotkeys" />
-        <span class="toggle-slider"></span>
-      </label>
-
-      <label class="toggle-label setting-row">
-        <div class="setting-info">
-          <span class="setting-name">Mask Password Values</span>
-          <span class="setting-desc">Show •••••• instead of real passwords</span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="settingHotkeys" />
+          <span class="tog"></span>
         </div>
-        <input type="checkbox" id="settingMaskPass" checked />
-        <span class="toggle-slider"></span>
+      </label>
+      <label class="setting-row">
+        <div>
+          <span class="setting-name">Mask passwords</span>
+          <span class="setting-desc">Show •••••• instead of real values</span>
+        </div>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="settingMaskPass" checked />
+          <span class="tog"></span>
+        </div>
+      </label>
+      <label class="setting-row">
+        <div>
+          <span class="setting-name">Right-click assertions</span>
+          <span class="setting-desc">Right-click to add Then assertions</span>
+        </div>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="settingRightClick" checked />
+          <span class="tog"></span>
+        </div>
       </label>
     </div>
 
-    <div class="settings-section">
-      <h4 class="settings-heading">Gherkin Style</h4>
-
-      <div class="setting-row field-row">
-        <label class="field-label">Indentation</label>
-        <select id="settingIndent" class="text-input select-input">
-          <option value="2">2 spaces</option>
-          <option value="4" selected>4 spaces</option>
-          <option value="tab">Tab</option>
-        </select>
-      </div>
-
-      <div class="setting-row field-row">
-        <label class="field-label">Input Debounce (ms)</label>
-        <input type="number" id="settingDebounce" class="text-input" value="1200" min="300" max="5000" step="100" />
+    <div class="settings-group">
+      <div class="settings-group-title">Gherkin Style</div>
+      <div class="setting-field-row">
+        <span class="setting-name">Input debounce</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="range" id="settingDebounce" min="300" max="3000" step="100" value="1200" class="range-input" />
+          <span class="setting-desc" id="debounceLabel">1.2s</span>
+        </div>
       </div>
     </div>
 
-    <div class="settings-section">
-      <h4 class="settings-heading">Data</h4>
+    <div class="settings-group">
+      <div class="settings-group-title">Data</div>
       <button class="danger-btn" id="btnClearAll">🗑 Clear All Saved Scenarios</button>
-      <div class="version-info">Gherkin Recorder v1.0.0</div>
+      <div class="version-badge">Gherkin Recorder v2.0.0</div>
     </div>
-
   </div>
 
-  <!-- ══════════════════════ TOAST ══════════════════════ -->
+  <!-- ── TOAST ──────────────────────────────────────────── -->
   <div class="toast" id="toast"></div>
 
-  <!-- Edit Step Modal -->
+  <!-- ── EDIT STEP MODAL ────────────────────────────────── -->
   <div class="modal-overlay" id="editModal">
     <div class="modal">
       <div class="modal-header">
         <span class="modal-title">Edit Step</span>
-        <button class="modal-close" id="modalClose">✕</button>
+        <button class="icon-only-btn" id="modalClose">✕</button>
       </div>
       <div class="modal-body">
-        <div class="field-row">
-          <label class="field-label">Label / Element Name</label>
-          <input type="text" id="editLabel" class="text-input" />
+        <div class="field">
+          <label class="field-label">Label / Element</label>
+          <input type="text" id="editLabel" class="field-input" />
         </div>
-        <div class="field-row" id="editValueRow">
+        <div class="field" id="editValueRow">
           <label class="field-label">Value</label>
-          <input type="text" id="editValue" class="text-input" />
+          <input type="text" id="editValue" class="field-input" />
         </div>
-        <div class="field-row">
+        <div class="field">
           <label class="field-label">Step Type</label>
-          <select id="editType" class="text-input select-input">
+          <select id="editType" class="field-input">
             <option value="navigate">Navigate</option>
             <option value="click">Click</option>
             <option value="input">Type Input</option>
@@ -270,45 +297,58 @@
             <option value="checkbox">Checkbox</option>
             <option value="submit">Submit Form</option>
             <option value="assert">Assert / Verify</option>
+            <option value="scroll">Scroll</option>
           </select>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="action-btn" id="modalCancel">Cancel</button>
-        <button class="action-btn primary-btn" id="modalSave">Save Changes</button>
+        <button class="pill-btn" id="modalCancel">Cancel</button>
+        <button class="pill-btn accent" id="modalSave">Save Changes</button>
       </div>
     </div>
   </div>
 
-  <!-- Add Assert Modal -->
+  <!-- ── ASSERT MODAL ───────────────────────────────────── -->
   <div class="modal-overlay" id="assertModal">
     <div class="modal">
       <div class="modal-header">
-        <span class="modal-title">Add Assertion Step</span>
-        <button class="modal-close" id="assertModalClose">✕</button>
+        <span class="modal-title">Add Assertion</span>
+        <button class="icon-only-btn" id="assertModalClose">✕</button>
       </div>
       <div class="modal-body">
-        <div class="field-row">
-          <label class="field-label">Assert Type</label>
-          <select id="assertType" class="text-input select-input">
-            <option value="see_text">I should see text</option>
-            <option value="see_element">I should see element</option>
-            <option value="not_see">I should not see</option>
-            <option value="url_contains">URL should contain</option>
-            <option value="title_is">Page title should be</option>
-            <option value="element_enabled">Element should be enabled</option>
-            <option value="element_disabled">Element should be disabled</option>
+        <div class="field">
+          <label class="field-label">Type</label>
+          <select id="assertType" class="field-input">
+            <option value="see_text">Should see text</option>
+            <option value="see_element">Should see element</option>
+            <option value="not_see">Should NOT see</option>
+            <option value="url_contains">URL contains</option>
+            <option value="title_is">Page title is</option>
+            <option value="element_enabled">Element is enabled</option>
+            <option value="element_disabled">Element is disabled</option>
+            <option value="count">Element count is</option>
           </select>
         </div>
-        <div class="field-row">
+        <div class="field">
           <label class="field-label">Value</label>
-          <input type="text" id="assertValue" class="text-input" placeholder="e.g. Welcome, John!" />
+          <input type="text" id="assertValue" class="field-input" placeholder="e.g. Welcome, John!" />
         </div>
       </div>
       <div class="modal-footer">
-        <button class="action-btn" id="assertModalCancel">Cancel</button>
-        <button class="action-btn primary-btn" id="assertModalSave">Add Step</button>
+        <button class="pill-btn" id="assertModalCancel">Cancel</button>
+        <button class="pill-btn accent" id="assertModalSave">Add Step</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ── SCREENSHOT MODAL ───────────────────────────────── -->
+  <div class="modal-overlay" id="screenshotModal">
+    <div class="modal screenshot-modal">
+      <div class="modal-header">
+        <span class="modal-title" id="screenshotModalTitle">Step Screenshot</span>
+        <button class="icon-only-btn" id="screenshotModalClose">✕</button>
+      </div>
+      <img id="screenshotImg" class="screenshot-full" src="" alt="Step screenshot" />
     </div>
   </div>
 

@@ -1,1010 +1,771 @@
-// ============================================================
-// popup.js — Extension Popup Controller
-// Handles all UI interactions, real-time step display,
-// Gherkin generation, scenario management, export.
-// ============================================================
-
+// popup.js — UI Controller v2
 'use strict';
 
-// ----- State -----
-let steps = [];
-let isRecording = false;
-let isPaused = false;
-let startTime = null;
-let timerInterval = null;
-let editingIndex = null;
+// ── State ─────────────────────────────────────────────────────
+let steps = [], isRecording = false, isPaused = false, startTime = null;
+let timerInterval = null, editingIndex = null;
+let isVideoRecording = false, isVideoPaused = false, isVideoProcessing = false, videoDataUrl = null;
+let isDark = true;
+let dragSrcIndex = null;
 
-// Video state
-let isVideoRecording = false;
-let isVideoPaused    = false;
-let isVideoProcessing = false;
-let videoDataUrl     = null;
-
-// ----- DOM Refs -----
+// ── DOM shortcuts ─────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-const statusBadge     = $('statusBadge');
-const statusText      = $('statusText');
-const btnStart        = $('btnStart');
-const btnPause        = $('btnPause');
-const btnStop         = $('btnStop');
-const btnClear        = $('btnClear');
-const stepCountLabel  = $('stepCountLabel');
-const timerLabel      = $('timerLabel');
-const pausedBadge     = $('pausedBadge');
-const stepsList       = $('stepsList');
-const emptyState      = $('emptyState');
-const stepSearch      = $('stepSearch');
-const gherkinOutput   = $('gherkinOutput');
-const featureName     = $('featureName');
-const scenarioName    = $('scenarioName');
-const tagsInput       = $('tagsInput');
-const savedList       = $('savedList');
-const editModal       = $('editModal');
-const assertModal     = $('assertModal');
-const toast           = $('toast');
+const statusOrb = $('statusOrb'), statusPill = $('statusPill');
+const btnStart = $('btnStart'), orbIcon = $('orbIcon'), orbLabel = $('orbLabel'), orbRing = $('orbRing');
+const btnPause = $('btnPause'), btnStop = $('btnStop'), btnClear = $('btnClear');
+const stepCountLabel = $('stepCountLabel'), timerLabel = $('timerLabel');
+const pausedBadge = $('pausedBadge'), videoBadge = $('videoBadge');
+const stepsList = $('stepsList'), stepSearch = $('stepSearch');
+const gherkinOutput = $('gherkinOutput'), featureName = $('featureName');
+const scenarioName = $('scenarioName'), tagsInput = $('tagsInput');
+const savedList = $('savedList'), toast = $('toast');
+let btnVideo, videoBadgeEl, videoPreviewPanel, videoPlayer, videoBtnLabel;
 
-// Video DOM refs (resolved after DOMContentLoaded)
-let btnVideo, videoBadge, videoPreviewPanel, videoPlayer, videoBtnLabel;
-
-// ===========================================================
-//  INIT
-// ===========================================================
+// ── Init ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Assign video DOM refs after DOM is ready
-  btnVideo          = $('btnVideoRecord');
-  videoBadge        = $('videoBadge');
-  videoPreviewPanel = $('videoPreviewPanel');
-  videoPlayer       = $('videoPlayer');
-  videoBtnLabel     = $('videoBtnLabel');
+  btnVideo = $('btnVideoRecord'); videoBadgeEl = $('videoBadge');
+  videoPreviewPanel = $('videoPreviewPanel'); videoPlayer = $('videoPlayer');
+  videoBtnLabel = $('videoBtnLabel');
 
+  loadTheme();
   await loadState();
   bindEvents();
   loadSavedScenarios();
+  updateExportOutput();
+  bindDebounceSlider();
 });
 
+// ── Load State ───────────────────────────────────────────────
 async function loadState() {
   return new Promise(resolve => {
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (resp) => {
       if (chrome.runtime.lastError || !resp) { resolve(); return; }
-      steps            = resp.steps || [];
-      isRecording      = resp.isRecording || false;
-      isPaused         = resp.isPaused || false;
-      startTime        = resp.startTime || null;
-      isVideoRecording = resp.isVideoRecording || false;
-      isVideoPaused    = resp.isVideoPaused || false;
-
-      renderSteps();
-      updateUIState();
-      updateVideoUI();
-      updateGherkin();
-
+      steps = resp.steps || []; isRecording = resp.isRecording || false;
+      isPaused = resp.isPaused || false; startTime = resp.startTime || null;
+      isVideoRecording = resp.isVideoRecording || false; isVideoPaused = resp.isVideoPaused || false;
+      renderSteps(); updateUIState(); updateVideoUI(); updateGherkin();
       if (isRecording && startTime) startTimer();
       resolve();
     });
   });
 }
 
-// ===========================================================
-//  MESSAGE LISTENER — real-time step updates from background
-// ===========================================================
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'STATE_UPDATE') {
-    const prevCount      = steps.length;
-    steps                = message.steps || [];
-    isRecording          = message.isRecording;
-    isPaused             = message.isPaused;
-    isVideoRecording     = message.isVideoRecording || false;
-    isVideoPaused        = message.isVideoPaused    || false;
-
-    if (steps.length !== prevCount) renderSteps();
-    updateStepCount();
-    updateGherkin();
-    updateVideoUI();
+// ── Real-time updates ─────────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'STATE_UPDATE') {
+    const prev = steps.length; steps = msg.steps || [];
+    isRecording = msg.isRecording; isPaused = msg.isPaused;
+    isVideoRecording = msg.isVideoRecording || false; isVideoPaused = msg.isVideoPaused || false;
+    if (steps.length !== prev) renderSteps();
+    updateStepCount(); updateGherkin(); updateVideoUI();
   }
-
-  // Background relays finished video data URL here
-  if (message.type === 'VIDEO_READY') {
-    isVideoRecording  = false;
-    isVideoProcessing = false;
-    videoDataUrl      = message.dataUrl;
-    updateVideoUI();
-    showVideoPreview(message.dataUrl, message.size);
-    showToast('✅ Video ready! Click Download.', 'success');
+  if (msg.type === 'VIDEO_READY') {
+    isVideoRecording = false; isVideoProcessing = false;
+    videoDataUrl = msg.dataUrl;
+    updateVideoUI(); showVideoPreview(msg.dataUrl, msg.size);
+    showToast('✅ Video ready! Download below.', 'success');
   }
 });
 
-// ===========================================================
-//  EVENT BINDINGS
-// ===========================================================
+// ── Bind Events ───────────────────────────────────────────────
 function bindEvents() {
-  // Controls
-  btnStart.addEventListener('click', startRecording);
+  // Record orb / controls
+  btnStart.addEventListener('click', handleOrbClick);
   btnPause.addEventListener('click', pauseRecording);
-  btnStop.addEventListener('click',  stopRecording);
+  btnStop.addEventListener('click', stopRecording);
   btnClear.addEventListener('click', clearSteps);
-
-  // Video recording
-  btnVideo.addEventListener('click', handleVideoButton);
+  if (btnVideo) btnVideo.addEventListener('click', handleVideoButton);
+  $('btnTheme').addEventListener('click', toggleTheme);
 
   // Tab switching
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-  });
+  document.querySelectorAll('.tab-item').forEach(b =>
+    b.addEventListener('click', () => switchTab(b.dataset.tab)));
 
-  // Gherkin tab actions
+  // Gherkin tab
   $('btnRefresh').addEventListener('click', updateGherkin);
   $('btnCopy').addEventListener('click', copyGherkin);
   $('btnDownload').addEventListener('click', downloadGherkin);
   $('btnSaveScenario').addEventListener('click', saveScenario);
-
-  // Real-time Gherkin refresh on name change
-  featureName.addEventListener('input',  updateGherkin);
-  scenarioName.addEventListener('input', updateGherkin);
-  tagsInput.addEventListener('input',    updateGherkin);
+  [featureName, scenarioName, tagsInput].forEach(el => el.addEventListener('input', updateGherkin));
   $('optDedupe').addEventListener('change', updateGherkin);
   $('optSmartNav').addEventListener('change', updateGherkin);
 
-  // Step search / filter
-  stepSearch.addEventListener('input', () => renderSteps(stepSearch.value));
+  // Export tab
+  $('exportFormat').addEventListener('change', updateExportOutput);
+  $('btnExportRefresh').addEventListener('click', updateExportOutput);
+  $('btnExportCopy').addEventListener('click', copyExport);
+  $('btnExportDownload').addEventListener('click', downloadExport);
 
-  // Add assertion button
-  $('btnAddAssert').addEventListener('click', () => {
-    assertModal.classList.add('open');
-    $('assertValue').focus();
-  });
+  // Record toolbar
+  stepSearch.addEventListener('input', () => renderSteps(stepSearch.value));
+  $('btnAddAssert').addEventListener('click', () => { assertModal.classList.add('open'); $('assertValue').focus(); });
 
   // Edit modal
-  $('modalClose').addEventListener('click',   closeEditModal);
-  $('modalCancel').addEventListener('click',  closeEditModal);
-  $('modalSave').addEventListener('click',    saveEditStep);
-  editModal.addEventListener('click', e => { if (e.target === editModal) closeEditModal(); });
+  $('modalClose').addEventListener('click', closeEditModal);
+  $('modalCancel').addEventListener('click', closeEditModal);
+  $('modalSave').addEventListener('click', saveEditStep);
+  $('editModal').addEventListener('click', e => { if (e.target === $('editModal')) closeEditModal(); });
 
   // Assert modal
-  $('assertModalClose').addEventListener('click',  () => assertModal.classList.remove('open'));
-  $('assertModalCancel').addEventListener('click', () => assertModal.classList.remove('open'));
-  $('assertModalSave').addEventListener('click',   addManualAssert);
-  assertModal.addEventListener('click', e => { if (e.target === assertModal) assertModal.classList.remove('open'); });
+  $('assertModalClose').addEventListener('click', () => $('assertModal').classList.remove('open'));
+  $('assertModalCancel').addEventListener('click', () => $('assertModal').classList.remove('open'));
+  $('assertModalSave').addEventListener('click', addManualAssert);
+  $('assertModal').addEventListener('click', e => { if (e.target === $('assertModal')) $('assertModal').classList.remove('open'); });
+  $('assertValue').addEventListener('keydown', e => { if (e.key === 'Enter') addManualAssert(); });
+
+  // Screenshot modal
+  $('screenshotModalClose').addEventListener('click', () => $('screenshotModal').classList.remove('open'));
+  $('screenshotModal').addEventListener('click', e => { if (e.target === $('screenshotModal')) $('screenshotModal').classList.remove('open'); });
 
   // Saved tab
   $('btnExportAll').addEventListener('click', exportAllScenarios);
 
   // Settings
   $('btnClearAll').addEventListener('click', () => {
-    if (confirm('Delete all saved scenarios? This cannot be undone.')) {
-      chrome.storage.local.set({ scenarios: [] }, () => {
-        loadSavedScenarios();
-        showToast('All scenarios deleted', 'error');
-      });
-    }
+    if (!confirm('Delete all saved scenarios?')) return;
+    chrome.storage.local.set({ scenarios: [] }, () => { loadSavedScenarios(); showToast('Cleared', 'info'); });
   });
 
-  // Keyboard shortcut: Enter in assert value field
-  $('assertValue').addEventListener('keydown', e => {
-    if (e.key === 'Enter') addManualAssert();
+  // Keyboard shortcuts in popup
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'r' && !isRecording) handleOrbClick();
+    if (e.key === 's' && isRecording) stopRecording();
+    if (e.key === 'p' && isRecording) pauseRecording();
   });
 }
 
-// ===========================================================
-//  RECORDING CONTROLS
-// ===========================================================
+function bindDebounceSlider() {
+  const slider = $('settingDebounce'), label = $('debounceLabel');
+  if (!slider) return;
+  slider.addEventListener('input', () => {
+    label.textContent = (slider.value / 1000).toFixed(1) + 's';
+  });
+}
+
+// ── Orb Click — morphs between Start / Stop ──────────────────
+function handleOrbClick() {
+  if (!isRecording) startRecording();
+  else stopRecording();
+}
+
+// ── Recording Controls ────────────────────────────────────────
 function startRecording() {
   chrome.runtime.sendMessage({ type: 'START_RECORDING' }, () => {
-    isRecording = true;
-    isPaused    = false;
-    startTime   = Date.now();
-    steps       = [];
-    renderSteps();
-    updateUIState();
-    startTimer();
-    showToast('Recording started!', 'success');
-    switchTab('record');
+    isRecording = true; isPaused = false; startTime = Date.now(); steps = [];
+    renderSteps(); updateUIState(); startTimer();
+    showToast('🔴 Recording started!', 'success'); switchTab('record');
   });
 }
 
 function pauseRecording() {
   chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING' }, (resp) => {
-    if (!resp) return;
-    isPaused = resp.isPaused;
-    updateUIState();
-    showToast(isPaused ? 'Recording paused' : 'Recording resumed', 'info');
-    if (isPaused) {
-      clearInterval(timerInterval);
-    } else {
-      startTimer();
-    }
+    if (!resp) return; isPaused = resp.isPaused; updateUIState();
+    showToast(isPaused ? '⏸ Paused' : '▶ Resumed', 'info');
+    if (isPaused) clearInterval(timerInterval); else startTimer();
   });
 }
 
 function stopRecording() {
   chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }, (resp) => {
-    isRecording = false;
-    isPaused    = false;
+    isRecording = false; isPaused = false;
     if (resp) steps = resp.steps || steps;
-    stopTimer();
-    updateUIState();
-    renderSteps();
-    updateGherkin();
-    showToast(`Stopped. ${steps.length} steps recorded.`, 'success');
-    // Auto-switch to Gherkin tab if steps exist
-    if (steps.length > 0) {
-      setTimeout(() => switchTab('gherkin'), 600);
-    }
+    stopTimer(); updateUIState(); renderSteps(); updateGherkin();
+    showToast(`⏹ Stopped. ${steps.length} steps.`, 'success');
+    if (steps.length > 0) setTimeout(() => switchTab('gherkin'), 600);
   });
 }
 
 function clearSteps() {
   if (steps.length > 0 && !confirm('Clear all recorded steps?')) return;
   chrome.runtime.sendMessage({ type: 'CLEAR_STEPS' }, () => {
-    steps = [];
-    stopTimer();
-    if (!isRecording) startTime = null;
-    else startTime = Date.now();
-    renderSteps();
-    updateStepCount();
-    updateGherkin();
-    showToast('Steps cleared', 'info');
+    steps = []; if (!isRecording) startTime = null; else startTime = Date.now();
+    renderSteps(); updateStepCount(); updateGherkin(); showToast('Cleared', 'info');
   });
 }
 
-// ===========================================================
-//  TIMER
-// ===========================================================
-function startTimer() {
-  clearInterval(timerInterval);
-  timerInterval = setInterval(updateTimer, 1000);
-  updateTimer();
-}
-
-function stopTimer() {
-  clearInterval(timerInterval);
-  timerInterval = null;
-}
-
+// ── Timer ─────────────────────────────────────────────────────
+function startTimer() { clearInterval(timerInterval); timerInterval = setInterval(updateTimer, 1000); updateTimer(); }
+function stopTimer()  { clearInterval(timerInterval); timerInterval = null; }
 function updateTimer() {
   if (!startTime) { timerLabel.textContent = '00:00'; return; }
-  const elapsed = Math.floor((Date.now() - startTime) / 1000);
-  const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
-  const s = String(elapsed % 60).padStart(2, '0');
-  timerLabel.textContent = `${m}:${s}`;
+  const s = Math.floor((Date.now() - startTime) / 1000);
+  timerLabel.textContent = `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 }
 
-// ===========================================================
-//  UI STATE
-// ===========================================================
+// ── UI State ──────────────────────────────────────────────────
 function updateUIState() {
-  // Buttons
-  btnStart.disabled = isRecording;
-  btnPause.disabled = !isRecording;
-  btnStop.disabled  = !isRecording;
-  btnPause.querySelector('span').textContent = isPaused ? 'Resume' : 'Pause';
+  btnPause.disabled = !isRecording; btnStop.disabled = !isRecording;
+  btnPause.querySelector('span:last-child').textContent = isPaused ? 'Resume' : 'Pause';
 
-  // Status badge
-  statusBadge.className = 'status-badge';
+  // Orb
   if (isRecording && !isPaused) {
-    statusBadge.classList.add('recording');
-    statusText.textContent = 'REC';
+    orbIcon.textContent = '⏹'; orbLabel.textContent = 'Click to Stop';
+    orbRing.className = 'orb-ring recording';
   } else if (isPaused) {
-    statusBadge.classList.add('paused');
-    statusText.textContent = 'PAUSED';
-  } else if (steps.length > 0) {
-    statusBadge.classList.add('done');
-    statusText.textContent = 'DONE';
+    orbIcon.textContent = '▶'; orbLabel.textContent = 'Click to Stop';
+    orbRing.className = 'orb-ring';
   } else {
-    statusText.textContent = 'IDLE';
+    orbIcon.textContent = '⏺'; orbLabel.textContent = 'Click to Record';
+    orbRing.className = 'orb-ring idle';
   }
 
-  // Paused badge
-  pausedBadge.style.display = isPaused ? 'flex' : 'none';
+  // Status orb & pill
+  statusOrb.className = 'brand-orb';
+  statusPill.className = 'status-pill';
+  if (isRecording && !isPaused) { statusOrb.classList.add('recording'); statusPill.classList.add('recording'); statusPill.textContent = 'REC'; }
+  else if (isPaused)             { statusOrb.classList.add('paused');    statusPill.classList.add('paused');    statusPill.textContent = 'PAUSED'; }
+  else if (steps.length > 0)    { statusOrb.classList.add('done');      statusPill.classList.add('done');      statusPill.textContent = 'DONE'; }
+  else                           { statusPill.textContent = 'IDLE'; }
 
+  pausedBadge.style.display = isPaused ? 'flex' : 'none';
   updateStepCount();
 }
 
 function updateStepCount() {
   const n = steps.length;
-  stepCountLabel.textContent = n === 0 ? '0 steps recorded'
-    : n === 1 ? '1 step recorded'
-    : `${n} steps recorded`;
+  stepCountLabel.textContent = n === 0 ? '0 steps' : n === 1 ? '1 step' : `${n} steps`;
 }
 
-// ===========================================================
-//  RENDER STEPS
-// ===========================================================
+// ── Render Steps ──────────────────────────────────────────────
 function renderSteps(filter = '') {
-  const filterLower = filter.toLowerCase();
-  const filtered = filter
-    ? steps.filter((s, i) => getStepSummary(s).toLowerCase().includes(filterLower))
-    : steps;
+  const fl = filter.toLowerCase();
+  const filtered = filter ? steps.filter(s => getStepSummary(s).toLowerCase().includes(fl)) : steps;
 
-  // Show/hide empty state
-  if (steps.length === 0) {
-    stepsList.innerHTML = '';
-    stepsList.appendChild(buildEmptyState());
-    return;
-  }
-
+  if (steps.length === 0) { stepsList.innerHTML = buildEmptyHTML(); return; }
   if (filtered.length === 0) {
-    stepsList.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">🔍</div>
-        <p class="empty-title">No matches</p>
-        <p class="empty-desc">No steps match "${filter}"</p>
-      </div>`;
+    stepsList.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><p class="empty-title">No matches</p><p class="empty-desc">No steps match "${escHtml(filter)}"</p></div>`;
     return;
   }
 
-  // Build fragment for performance
-  const fragment = document.createDocumentFragment();
-  filtered.forEach((step, displayIdx) => {
-    const realIdx = steps.indexOf(step);
-    fragment.appendChild(buildStepEl(step, realIdx, displayIdx + 1));
+  const frag = document.createDocumentFragment();
+  filtered.forEach((step, di) => {
+    const ri = steps.indexOf(step);
+    frag.appendChild(buildStepCard(step, ri, di + 1));
   });
-
   stepsList.innerHTML = '';
-  stepsList.appendChild(fragment);
-
-  // Scroll to bottom if recording
-  if (isRecording && !filter) {
-    stepsList.scrollTop = stepsList.scrollHeight;
-  }
+  stepsList.appendChild(frag);
+  if (isRecording && !filter) stepsList.scrollTop = stepsList.scrollHeight;
 }
 
-function buildEmptyState() {
-  const div = document.createElement('div');
-  div.className = 'empty-state';
-  div.innerHTML = `
-    <div class="empty-icon">🎬</div>
+function buildEmptyHTML() {
+  return `<div class="empty-state"><div class="empty-icon">🎬</div>
     <p class="empty-title">Ready to Record</p>
-    <p class="empty-desc">Click <strong>Start</strong> then interact with any web page.<br>Every click, type, and navigation will be captured here.</p>
-  `;
-  return div;
+    <p class="empty-desc">Click the orb above then interact with any web page.</p></div>`;
 }
 
-function buildStepEl(step, realIdx, displayNum) {
-  const el = document.createElement('div');
-  el.className = 'step-item';
-  el.dataset.index = realIdx;
+function buildStepCard(step, ri, dn) {
+  const card = document.createElement('div');
+  card.className = 'step-card'; card.dataset.index = ri;
+  card.draggable = true;
 
   const icon    = getStepIcon(step);
   const summary = getStepSummary(step);
   const badge   = buildBadge(step.type);
-  const meta    = buildMeta(step);
+  const pillCls = getPillClass(step.type);
+  const timing  = buildTiming(step, ri);
 
-  el.innerHTML = `
-    <span class="step-number">${displayNum}</span>
-    <span class="step-icon">${icon}</span>
+  // Screenshot thumbnail
+  const thumbHtml = step.screenshot
+    ? `<img class="step-screenshot" src="${step.screenshot}" title="Click to enlarge" />`
+    : '';
+
+  card.innerHTML = `
+    <div class="drag-handle" title="Drag to reorder">⠿</div>
+    <div class="step-num">${dn}</div>
+    <div class="step-icon-pill ${pillCls}">${icon}</div>
     <div class="step-content">
-      <div class="step-summary">${escapeHtml(summary)}</div>
-      <div class="step-meta">${badge}${meta}</div>
+      <div class="step-summary">${escHtml(summary)}</div>
+      <div class="step-meta-row">${badge}${timing}</div>
     </div>
+    ${thumbHtml}
     <div class="step-actions">
-      <button class="step-action-btn edit-btn" title="Edit step">✏️</button>
-      <button class="step-action-btn delete delete-btn" title="Delete step">🗑</button>
+      <button class="step-act-btn copy-s" title="Copy as Gherkin">📋</button>
+      <button class="step-act-btn dup-btn" title="Duplicate step">⧉</button>
+      <button class="step-act-btn edit-btn" title="Edit step">✏️</button>
+      <button class="step-act-btn del" title="Delete step">🗑</button>
     </div>
   `;
 
-  el.querySelector('.edit-btn').addEventListener('click', (e) => {
-    e.stopPropagation();
-    openEditModal(realIdx);
+  // Events
+  card.addEventListener('dragstart', e => { dragSrcIndex = ri; card.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+  card.addEventListener('dragend',   () => { dragSrcIndex = null; card.classList.remove('dragging'); document.querySelectorAll('.drag-over').forEach(c => c.classList.remove('drag-over')); });
+  card.addEventListener('dragover',  e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; card.classList.add('drag-over'); });
+  card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+  card.addEventListener('drop', e => {
+    e.preventDefault(); card.classList.remove('drag-over');
+    if (dragSrcIndex !== null && dragSrcIndex !== ri) {
+      chrome.runtime.sendMessage({ type: 'REORDER_STEP', from: dragSrcIndex, to: ri }, (resp) => {
+        if (resp?.success) { steps = resp.steps; renderSteps(stepSearch.value); updateGherkin(); }
+      });
+    }
   });
 
-  el.querySelector('.delete-btn').addEventListener('click', (e) => {
+  if (step.screenshot) {
+    card.querySelector('.step-screenshot').addEventListener('click', (e) => { e.stopPropagation(); openScreenshotModal(step.screenshot, summary); });
+  }
+  card.querySelector('.copy-s').addEventListener('click', e => { e.stopPropagation(); copyStepAsGherkin(step, ri); });
+  card.querySelector('.dup-btn').addEventListener('click', e => {
     e.stopPropagation();
-    deleteStep(realIdx, el);
+    chrome.runtime.sendMessage({ type: 'DUPLICATE_STEP', index: ri }, (resp) => {
+      if (resp?.success) { steps = resp.steps; renderSteps(stepSearch.value); updateGherkin(); showToast('Step duplicated', 'success'); }
+    });
   });
+  card.querySelector('.edit-btn').addEventListener('click', e => { e.stopPropagation(); openEditModal(ri); });
+  card.querySelector('.del').addEventListener('click', e => { e.stopPropagation(); deleteStep(ri, card); });
 
-  return el;
+  return card;
 }
 
 function buildBadge(type) {
-  const map = {
-    navigate: ['navigate', 'NAVIGATE'],
-    click:    ['click',    'CLICK'],
-    input:    ['input',    'INPUT'],
-    select:   ['select',   'SELECT'],
-    checkbox: ['checkbox', 'CHECK'],
-    radio:    ['checkbox', 'RADIO'],
-    submit:   ['submit',   'SUBMIT'],
-    file:     ['file',     'FILE'],
-    hotkey:   ['hotkey',   'KEY'],
-    assert:   ['assert',   'ASSERT']
-  };
-  const [cls, label] = map[type] || ['navigate', type.toUpperCase()];
-  return `<span class="step-type-badge badge-${cls}">${label}</span>`;
+  const map = { navigate:'navigate',click:'click',input:'input',select:'select',
+                checkbox:'checkbox',submit:'submit',assert:'assert',scroll:'scroll',
+                hotkey:'hotkey',dragdrop:'dragdrop',paste:'input',radio:'checkbox',file:'input' };
+  const cls = map[type] || 'default';
+  const labels = { navigate:'NAV',click:'CLICK',input:'INPUT',select:'SELECT',
+                   checkbox:'CHECK',submit:'SUBMIT',assert:'ASSERT',scroll:'SCROLL',
+                   hotkey:'KEY',dragdrop:'DRAG',paste:'PASTE',radio:'RADIO',file:'FILE' };
+  return `<span class="step-type-badge badge-${cls}">${labels[type]||type.toUpperCase()}</span>`;
 }
 
-function buildMeta(step) {
-  if (step.type === 'navigate') {
-    try { return new URL(step.url).hostname; } catch { return step.url; }
-  }
-  if (step.type === 'input') return `${step.inputType || 'text'} field`;
-  if (step.type === 'click') return step.elementType || '';
-  return '';
+function getPillClass(type) {
+  const m = { navigate:'pill-nav',click:'pill-click',input:'pill-input',select:'pill-select',
+              checkbox:'pill-checkbox',submit:'pill-submit',assert:'pill-assert',
+              scroll:'pill-scroll',dragdrop:'pill-dragdrop',hotkey:'pill-hotkey',
+              radio:'pill-checkbox',paste:'pill-input',file:'pill-input' };
+  return m[type] || 'pill-default';
 }
 
-// ===========================================================
-//  STEP ACTIONS
-// ===========================================================
+function buildTiming(step, ri) {
+  if (ri === 0 || !step.timestamp) return '';
+  const prev = steps[ri - 1];
+  if (!prev?.timestamp) return '';
+  const diff = step.timestamp - prev.timestamp;
+  if (diff < 500) return '';
+  const label = diff < 60000
+    ? `+${(diff / 1000).toFixed(1)}s`
+    : `+${Math.floor(diff / 60000)}m${String(Math.floor((diff % 60000) / 1000)).padStart(2,'0')}s`;
+  return `<span class="step-time">${label}</span>`;
+}
+
+// ── Screenshot Modal ──────────────────────────────────────────
+function openScreenshotModal(src, title) {
+  $('screenshotImg').src = src;
+  $('screenshotModalTitle').textContent = title || 'Step Screenshot';
+  $('screenshotModal').classList.add('open');
+}
+
+// ── Step Actions ──────────────────────────────────────────────
 function deleteStep(index, el) {
-  // Animate out
-  el.style.opacity = '0';
-  el.style.transform = 'translateX(20px)';
-  el.style.transition = 'all 200ms ease';
-
+  el.style.opacity = '0'; el.style.transform = 'translateX(16px)'; el.style.transition = 'all 200ms ease';
   setTimeout(() => {
     chrome.runtime.sendMessage({ type: 'DELETE_STEP', index }, (resp) => {
-      if (resp && resp.success) {
-        steps = resp.steps;
-        renderSteps(stepSearch.value);
-        updateStepCount();
-        updateGherkin();
-      }
+      if (resp?.success) { steps = resp.steps; renderSteps(stepSearch.value); updateStepCount(); updateGherkin(); }
     });
   }, 200);
 }
 
-function openEditModal(index) {
-  editingIndex = index;
-  const step = steps[index];
+function copyStepAsGherkin(step, index) {
+  const result = stepToGherkin(step, index, index > 0 ? 'When' : null);
+  if (result) {
+    navigator.clipboard.writeText(`    ${result.line}`).then(() => showToast('Step copied!', 'success')).catch(() => {});
+  }
+}
 
+// ── Edit Modal ────────────────────────────────────────────────
+function openEditModal(index) {
+  editingIndex = index; const step = steps[index];
   $('editLabel').value = step.label || step.url || '';
   $('editValue').value = step.value || '';
   $('editType').value  = step.type  || 'click';
-
-  // Show/hide value row based on type
-  const showValue = !['navigate', 'submit', 'assert'].includes(step.type);
-  $('editValueRow').style.display = showValue ? '' : 'none';
-  if (step.type === 'assert') {
-    $('editValueRow').style.display = '';
-    $('editValue').value = step.value || '';
-  }
-
-  editModal.classList.add('open');
-  $('editLabel').focus();
+  $('editValueRow').style.display = ['navigate'].includes(step.type) ? 'none' : '';
+  $('editModal').classList.add('open'); $('editLabel').focus();
 }
-
-function closeEditModal() {
-  editModal.classList.remove('open');
-  editingIndex = null;
-}
-
+function closeEditModal() { $('editModal').classList.remove('open'); editingIndex = null; }
 function saveEditStep() {
   if (editingIndex === null) return;
-
-  const step  = steps[editingIndex];
-  const label = $('editLabel').value.trim();
-  const value = $('editValue').value.trim();
-  const type  = $('editType').value;
-
-  const updates = { label, type };
-  if (value) updates.value = value;
-  if (type === 'navigate') {
-    updates.url = label;
-    delete updates.label;
-  }
-
+  const updates = { label: $('editLabel').value.trim(), type: $('editType').value };
+  if ($('editValue').value.trim()) updates.value = $('editValue').value.trim();
+  if (updates.type === 'navigate') { updates.url = updates.label; delete updates.label; }
   chrome.runtime.sendMessage({ type: 'UPDATE_STEP', index: editingIndex, updates }, (resp) => {
-    if (resp && resp.success) {
-      steps = resp.steps;
-      renderSteps(stepSearch.value);
-      updateGherkin();
-      showToast('Step updated', 'success');
-    }
+    if (resp?.success) { steps = resp.steps; renderSteps(stepSearch.value); updateGherkin(); showToast('Step updated', 'success'); }
   });
-
   closeEditModal();
 }
 
+// ── Manual Assert ─────────────────────────────────────────────
 function addManualAssert() {
-  const assertType = $('assertType').value;
-  const value = $('assertValue').value.trim();
-  if (!value) { showToast('Please enter an assertion value', 'error'); return; }
+  const type = $('assertType').value;
+  const val  = $('assertValue').value.trim();
+  if (!val) { showToast('Enter a value', 'error'); return; }
 
-  const assertLabels = {
-    see_text:        `I should see "${value}"`,
-    see_element:     `I should see the "${value}" element`,
-    not_see:         `I should not see "${value}"`,
-    url_contains:    `the URL should contain "${value}"`,
-    title_is:        `the page title should be "${value}"`,
-    element_enabled: `the "${value}" element should be enabled`,
-    element_disabled:`the "${value}" element should be disabled`
+  const labels = {
+    see_text:        `Then I should see "${val}"`,
+    see_element:     `Then I should see the "${val}" element`,
+    not_see:         `Then I should not see "${val}"`,
+    url_contains:    `Then the URL should contain "${val}"`,
+    title_is:        `Then the page title should be "${val}"`,
+    element_enabled: `Then the "${val}" element should be enabled`,
+    element_disabled:`Then the "${val}" element should be disabled`,
+    count:           `Then there should be "${val}" elements`,
   };
 
-  const step = {
-    type: 'assert',
-    elementType: 'assertion',
-    assertType,
-    label: value,
-    value,
-    gherkinOverride: `Then ${assertLabels[assertType]}`,
-    timestamp: Date.now()
-  };
+  const step = { type: 'assert', elementType: 'assertion', assertType: type,
+                 label: val, value: val, gherkinOverride: labels[type], timestamp: Date.now() };
 
-  chrome.runtime.sendMessage({ type: 'RECORD_ACTION', action: step }, (resp) => {
-    // Also update local steps
+  chrome.runtime.sendMessage({ type: 'RECORD_ACTION', action: step }, () => {
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (state) => {
       if (state) steps = state.steps || steps;
-      renderSteps();
-      updateStepCount();
-      updateGherkin();
+      renderSteps(); updateStepCount(); updateGherkin();
     });
   });
 
-  assertModal.classList.remove('open');
+  $('assertModal').classList.remove('open');
   $('assertValue').value = '';
   showToast('Assertion added!', 'success');
 }
 
-// ===========================================================
-//  GHERKIN GENERATION
-// ===========================================================
+// ── Gherkin Generation ────────────────────────────────────────
 function updateGherkin() {
-  const feature  = featureName.value.trim()  || 'My Feature';
-  const scenario = scenarioName.value.trim() || 'My Scenario';
-  const tags     = tagsInput.value.trim();
-  const dedupe   = $('optDedupe').checked;
+  const feat = featureName.value.trim() || 'My Feature';
+  const scen = scenarioName.value.trim() || 'My Scenario';
+  const tags = tagsInput.value.trim();
+  const ded  = $('optDedupe').checked;
 
-  let workingSteps = [...steps];
-  if (dedupe) workingSteps = deduplicateSteps(workingSteps);
+  let ws = [...steps];
+  if (ded) ws = deduplicateSteps(ws);
 
-  // Handle manual assert overrides
-  workingSteps = workingSteps.map(s => {
-    if (s.gherkinOverride) return { ...s, _overrideText: s.gherkinOverride };
-    return s;
-  });
-
-  if (workingSteps.length === 0) {
-    gherkinOutput.innerHTML = `<span class="placeholder-text">Record some steps to generate Gherkin output...</span>`;
+  if (ws.length === 0) {
+    gherkinOutput.innerHTML = `<span class="muted">Start recording to generate Gherkin…</span>`;
     return;
   }
-
-  const raw = generateGherkinWithOverrides(workingSteps, feature, scenario, tags);
-  gherkinOutput.innerHTML = syntaxHighlight(raw);
+  const raw = buildGherkinText(ws, feat, scen, tags);
+  gherkinOutput.innerHTML = syntaxHL(raw);
 }
 
-function generateGherkinWithOverrides(steps, featureName, scenarioName, tags) {
+function buildGherkinText(steps, feat, scen, tags) {
   const lines = [];
-
   if (tags) lines.push(tags);
-  lines.push(`Feature: ${featureName}`);
+  lines.push(`Feature: ${feat}`);
   lines.push('');
-
-  const firstNav = steps.find(s => s.type === 'navigate');
-  if (firstNav) {
-    lines.push(`  # URL: ${firstNav.url}`);
-    lines.push(`  # Steps: ${steps.length}`);
-    lines.push('');
-  }
-
-  lines.push(`  Scenario: ${scenarioName}`);
-
-  let prevKeyword = null;
-  let stepIndex   = 0;
-
+  const fn = steps.find(s => s.type === 'navigate');
+  if (fn) { lines.push(`  # URL: ${fn.url}`); lines.push(`  # Steps: ${steps.length}`); lines.push(''); }
+  lines.push(`  Scenario: ${scen}`);
+  let prevKw = null, idx = 0;
   for (const step of steps) {
-    // Check for manual override
-    if (step._overrideText) {
-      lines.push(`    ${step._overrideText}`);
-      prevKeyword = 'Then';
-      stepIndex++;
-      continue;
-    }
-
-    const result = stepToGherkin(step, stepIndex, prevKeyword);
-    if (!result) continue;
-
-    lines.push(`    ${result.line}`);
-    prevKeyword = result.keyword;
-    stepIndex++;
+    if (step._overrideText) { lines.push(`    ${step._overrideText}`); prevKw = 'Then'; idx++; continue; }
+    if (step.gherkinOverride) { lines.push(`    ${step.gherkinOverride}`); prevKw = 'Then'; idx++; continue; }
+    const r = stepToGherkin(step, idx, prevKw);
+    if (!r) continue;
+    lines.push(`    ${r.line}`); prevKw = r.keyword; idx++;
   }
-
+  if (prevKw === 'When') lines.push(`    Then I verify the page state`);
   lines.push('');
   return lines.join('\n');
 }
 
-// Syntax highlight the Gherkin output
-function syntaxHighlight(text) {
-  return escapeHtml(text)
-    .replace(/^(Feature:)/gm,  '<span class="kw-feature">Feature:</span>')
+function syntaxHL(text) {
+  return escHtml(text)
+    .replace(/^(Feature:)/gm,    '<span class="kw-feature">Feature:</span>')
     .replace(/^(  Scenario:)/gm, '<span class="kw-scenario">  Scenario:</span>')
-    .replace(/^(  Scenario Outline:)/gm, '<span class="kw-scenario">  Scenario Outline:</span>')
     .replace(/^(    Given )/gm,  '<span class="kw-given">    Given </span>')
     .replace(/^(    When )/gm,   '<span class="kw-when">    When </span>')
     .replace(/^(    Then )/gm,   '<span class="kw-then">    Then </span>')
     .replace(/^(    And )/gm,    '<span class="kw-and">    And </span>')
-    .replace(/^(    But )/gm,    '<span class="kw-and">    But </span>')
     .replace(/(#.*)/gm,          '<span class="kw-comment">$1</span>')
     .replace(/(@\S+)/g,          '<span class="kw-tag">$1</span>')
-    .replace(/"([^"]*)"/g,        '"<span class="kw-string">$1</span>"');
+    .replace(/"([^"]*)"/g,       '"<span class="kw-string">$1</span>"');
 }
 
-// ===========================================================
-//  EXPORT
-// ===========================================================
 function copyGherkin() {
   const text = getRawGherkin();
-  if (!text || text.includes('Record some steps')) {
-    showToast('Nothing to copy — record some steps first', 'error');
-    return;
-  }
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('Copied to clipboard!', 'success');
-  }).catch(() => {
-    // Fallback
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    showToast('Copied!', 'success');
-  });
+  if (!text || steps.length === 0) { showToast('Nothing to copy', 'error'); return; }
+  navigator.clipboard.writeText(text).then(() => showToast('Copied!', 'success')).catch(() => showToast('Copy failed','error'));
 }
 
 function downloadGherkin() {
+  if (steps.length === 0) { showToast('No steps to download', 'error'); return; }
   const text = getRawGherkin();
-  if (!text || steps.length === 0) {
-    showToast('Nothing to download — record some steps first', 'error');
-    return;
-  }
-  const filename = `${sanitizeFilename(scenarioName.value || 'scenario')}.feature`;
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast(`Downloaded ${filename}`, 'success');
+  const fn   = sanitize(scenarioName.value || 'scenario') + '.feature';
+  downloadText(text, fn, 'text/plain');
+  showToast(`Downloaded ${fn}`, 'success');
 }
 
 function getRawGherkin() {
-  const feature  = featureName.value.trim()  || 'My Feature';
-  const scenario = scenarioName.value.trim() || 'My Scenario';
-  const tags     = tagsInput.value.trim();
-  const dedupe   = $('optDedupe').checked;
-  let workingSteps = [...steps];
-  if (dedupe) workingSteps = deduplicateSteps(workingSteps);
-  return generateGherkinWithOverrides(workingSteps, feature, scenario, tags);
+  let ws = [...steps];
+  if ($('optDedupe').checked) ws = deduplicateSteps(ws);
+  return buildGherkinText(ws, featureName.value.trim() || 'My Feature', scenarioName.value.trim() || 'My Scenario', tagsInput.value.trim());
 }
 
-// ===========================================================
-//  SAVED SCENARIOS
-// ===========================================================
-function saveScenario() {
-  if (steps.length === 0) {
-    showToast('No steps to save', 'error');
-    return;
-  }
-  const scenario = {
-    featureName:  featureName.value.trim()  || 'My Feature',
-    scenarioName: scenarioName.value.trim() || 'My Scenario',
-    tags:         tagsInput.value.trim(),
-    steps:        [...steps],
-    stepCount:    steps.length,
-    gherkin:      getRawGherkin(),
-    savedAt:      Date.now()
-  };
+// ── Export Tab ────────────────────────────────────────────────
+function updateExportOutput() {
+  const fmt = $('exportFormat').value;
+  const feat = featureName.value.trim() || 'My Feature';
+  const scen = scenarioName.value.trim() || 'My Scenario';
+  const tags = tagsInput.value.trim();
+  const titleMap = { playwright: 'Playwright (TypeScript)', cypress: 'Cypress', selenium: 'Selenium (Python)', json: 'JSON' };
+  $('exportOutputTitle').textContent = titleMap[fmt] || fmt;
 
-  chrome.runtime.sendMessage({ type: 'SAVE_SCENARIO', scenario }, (resp) => {
-    showToast(`Saved: "${scenario.scenarioName}"`, 'success');
-    loadSavedScenarios();
+  let ws = [...steps];
+  if ($('optDedupe') && $('optDedupe').checked) ws = deduplicateSteps(ws);
+
+  if (ws.length === 0) {
+    $('exportOutput').innerHTML = `<span class="muted">Record some steps first…</span>`;
+    $('varHints').style.display = 'none'; return;
+  }
+
+  let code = '';
+  if (fmt === 'playwright') code = generatePlaywright(ws, scen);
+  else if (fmt === 'cypress')   code = generateCypress(ws, scen);
+  else if (fmt === 'selenium')  code = generateSelenium(ws, scen);
+  else if (fmt === 'json')      code = generateJSON(ws, feat, scen, tags);
+
+  $('exportOutput').textContent = code;
+
+  // Variable detection
+  const vars = detectVariables(ws);
+  if (vars.length > 0) {
+    $('varHints').style.display = 'block';
+    $('varHintsList').innerHTML = vars.slice(0, 5).map(v =>
+      `<div class="var-hint-item">
+        <span>Step ${v.index + 1} — ${v.type}</span>
+        <span class="var-hint-val">${escHtml(v.value.slice(0, 30))}…</span>
+        <span class="var-hint-action" onclick="markAsVariable(${v.index})">→ {{variable}}</span>
+      </div>`
+    ).join('');
+  } else {
+    $('varHints').style.display = 'none';
+  }
+}
+
+function markAsVariable(index) {
+  if (!steps[index]) return;
+  const step = steps[index];
+  const newVal = `{{${step.type}_${index + 1}}}`;
+  chrome.runtime.sendMessage({ type: 'UPDATE_STEP', index, updates: { value: newVal } }, (resp) => {
+    if (resp?.success) { steps = resp.steps; updateExportOutput(); updateGherkin(); showToast('Marked as variable', 'success'); }
+  });
+}
+
+function copyExport() {
+  const text = $('exportOutput').textContent;
+  if (!text || steps.length === 0) { showToast('Nothing to copy', 'error'); return; }
+  navigator.clipboard.writeText(text).then(() => showToast('Copied!', 'success')).catch(() => {});
+}
+
+function downloadExport() {
+  const fmt  = $('exportFormat').value;
+  const text = $('exportOutput').textContent;
+  if (!text || steps.length === 0) { showToast('Nothing to download', 'error'); return; }
+  const exts = { playwright: 'spec.ts', cypress: 'cy.js', selenium: 'test.py', json: 'json' };
+  const fn   = sanitize(scenarioName.value || 'scenario') + '.' + (exts[fmt] || 'txt');
+  const mimes = { playwright: 'text/typescript', cypress: 'text/javascript', selenium: 'text/x-python', json: 'application/json' };
+  downloadText(text, fn, mimes[fmt] || 'text/plain');
+  showToast(`Downloaded ${fn}`, 'success');
+}
+
+// ── Saved Scenarios ───────────────────────────────────────────
+function saveScenario() {
+  if (steps.length === 0) { showToast('No steps to save', 'error'); return; }
+  const scenario = {
+    featureName: featureName.value.trim() || 'My Feature',
+    scenarioName: scenarioName.value.trim() || 'My Scenario',
+    tags: tagsInput.value.trim(), steps: [...steps],
+    stepCount: steps.length, gherkin: getRawGherkin(), savedAt: Date.now()
+  };
+  chrome.runtime.sendMessage({ type: 'SAVE_SCENARIO', scenario }, () => {
+    showToast(`Saved: "${scenario.scenarioName}"`, 'success'); loadSavedScenarios();
   });
 }
 
 function loadSavedScenarios() {
-  chrome.runtime.sendMessage({ type: 'GET_SCENARIOS' }, (resp) => {
-    renderSavedScenarios(resp?.scenarios || []);
-  });
+  chrome.runtime.sendMessage({ type: 'GET_SCENARIOS' }, (resp) => renderSavedScenarios(resp?.scenarios || []));
 }
 
 function renderSavedScenarios(scenarios) {
   if (scenarios.length === 0) {
-    savedList.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">💾</div>
-        <p class="empty-title">No Saved Scenarios</p>
-        <p class="empty-desc">Record and generate Gherkin, then click <strong>Save</strong> to store scenarios here.</p>
-      </div>`;
+    savedList.innerHTML = `<div class="empty-state"><div class="empty-icon">💾</div><p class="empty-title">No Saved Scenarios</p><p class="empty-desc">Record and save scenarios here.</p></div>`;
     return;
   }
-
   savedList.innerHTML = '';
-  [...scenarios].reverse().forEach(scenario => {
+  [...scenarios].reverse().forEach(sc => {
     const item = document.createElement('div');
-    item.className = 'saved-item';
-
-    const date = new Date(scenario.savedAt);
-    const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
+    item.className = 'saved-card';
+    const date = new Date(sc.savedAt).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
     item.innerHTML = `
-      <div class="saved-item-info">
-        <div class="saved-item-name" title="${escapeHtml(scenario.featureName)} / ${escapeHtml(scenario.scenarioName)}">
-          ${escapeHtml(scenario.scenarioName)}
-        </div>
-        <div class="saved-item-meta">
-          📋 ${scenario.stepCount} steps &nbsp;·&nbsp; ${dateStr}
-          ${scenario.tags ? ` &nbsp;·&nbsp; ${escapeHtml(scenario.tags)}` : ''}
-        </div>
+      <div class="saved-card-info">
+        <div class="saved-card-name">${escHtml(sc.scenarioName)}</div>
+        <div class="saved-card-meta">📋 ${sc.stepCount} steps · ${date}${sc.tags ? ' · ' + escHtml(sc.tags) : ''}</div>
       </div>
-      <div class="saved-item-actions">
-        <button class="action-btn" data-action="load" title="Load into editor">📂</button>
-        <button class="action-btn" data-action="copy" title="Copy Gherkin">📋</button>
-        <button class="action-btn" data-action="download" title="Download .feature">💾</button>
-        <button class="action-btn" data-action="delete" title="Delete">🗑</button>
-      </div>
-    `;
-
-    item.querySelectorAll('[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => handleSavedAction(btn.dataset.action, scenario));
-    });
-
+      <div class="saved-card-actions">
+        <button class="step-act-btn" data-action="load" title="Load">📂</button>
+        <button class="step-act-btn" data-action="copy" title="Copy">📋</button>
+        <button class="step-act-btn" data-action="download" title="Download">💾</button>
+        <button class="step-act-btn del" data-action="delete" title="Delete">🗑</button>
+      </div>`;
+    item.querySelectorAll('[data-action]').forEach(btn =>
+      btn.addEventListener('click', () => handleSavedAction(btn.dataset.action, sc)));
     savedList.appendChild(item);
   });
 }
 
-function handleSavedAction(action, scenario) {
-  switch (action) {
-    case 'load':
-      steps = [...scenario.steps];
-      featureName.value  = scenario.featureName;
-      scenarioName.value = scenario.scenarioName;
-      tagsInput.value    = scenario.tags || '';
-      renderSteps();
-      updateStepCount();
-      updateGherkin();
-      switchTab('record');
-      showToast(`Loaded "${scenario.scenarioName}"`, 'success');
-      break;
-
-    case 'copy':
-      navigator.clipboard.writeText(scenario.gherkin).then(() => {
-        showToast('Copied!', 'success');
-      }).catch(() => showToast('Copy failed', 'error'));
-      break;
-
-    case 'download': {
-      const filename = `${sanitizeFilename(scenario.scenarioName)}.feature`;
-      const blob = new Blob([scenario.gherkin], { type: 'text/plain' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url; a.download = filename; a.click();
-      URL.revokeObjectURL(url);
-      showToast(`Downloaded ${filename}`, 'success');
-      break;
-    }
-
-    case 'delete':
-      if (!confirm(`Delete "${scenario.scenarioName}"?`)) return;
-      chrome.runtime.sendMessage({ type: 'DELETE_SCENARIO', id: scenario.id }, (resp) => {
-        renderSavedScenarios(resp?.scenarios || []);
-        showToast('Scenario deleted', 'info');
-      });
-      break;
+function handleSavedAction(action, sc) {
+  if (action === 'load') {
+    steps = [...sc.steps]; featureName.value = sc.featureName;
+    scenarioName.value = sc.scenarioName; tagsInput.value = sc.tags || '';
+    renderSteps(); updateStepCount(); updateGherkin(); switchTab('record');
+    showToast(`Loaded "${sc.scenarioName}"`, 'success');
+  }
+  if (action === 'copy')     navigator.clipboard.writeText(sc.gherkin).then(() => showToast('Copied!','success')).catch(()=>{});
+  if (action === 'download') { downloadText(sc.gherkin, sanitize(sc.scenarioName)+'.feature', 'text/plain'); showToast('Downloaded','success'); }
+  if (action === 'delete') {
+    if (!confirm(`Delete "${sc.scenarioName}"?`)) return;
+    chrome.runtime.sendMessage({ type: 'DELETE_SCENARIO', id: sc.id }, (resp) => {
+      renderSavedScenarios(resp?.scenarios || []); showToast('Deleted','info');
+    });
   }
 }
 
 function exportAllScenarios() {
   chrome.runtime.sendMessage({ type: 'GET_SCENARIOS' }, (resp) => {
-    const scenarios = resp?.scenarios || [];
-    if (scenarios.length === 0) { showToast('No saved scenarios to export', 'error'); return; }
-
-    const combined = scenarios.map(s => s.gherkin).join('\n\n# ─────────────────\n\n');
-    const blob = new Blob([combined], { type: 'text/plain' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'all-scenarios.feature'; a.click();
-    URL.revokeObjectURL(url);
-    showToast(`Exported ${scenarios.length} scenarios`, 'success');
+    const sc = resp?.scenarios || [];
+    if (!sc.length) { showToast('No scenarios to export','error'); return; }
+    downloadText(sc.map(s => s.gherkin).join('\n\n# ──────────────────\n\n'), 'all-scenarios.feature', 'text/plain');
+    showToast(`Exported ${sc.length} scenarios`, 'success');
   });
 }
 
-// ===========================================================
-//  TAB SWITCHING
-// ===========================================================
-function switchTab(tabName) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
-  document.querySelectorAll('.tab-panel').forEach(p => {
-    p.classList.toggle('active', p.id === `tab-${tabName}`);
-    p.style.display = p.id === `tab-${tabName}` ? 'flex' : 'none';
-  });
-
-  if (tabName === 'gherkin')  updateGherkin();
-  if (tabName === 'saved')    loadSavedScenarios();
-}
-
-// Initialize correct tab display
-document.querySelectorAll('.tab-panel').forEach(p => {
-  p.style.display = p.classList.contains('active') ? 'flex' : 'none';
-});
-
-// ===========================================================
-//  TOAST NOTIFICATIONS
-// ===========================================================
-let toastTimeout;
-function showToast(msg, type = 'success') {
-  toast.textContent = msg;
-  toast.className   = `toast ${type} show`;
-  clearTimeout(toastTimeout);
-  toastTimeout = setTimeout(() => {
-    toast.classList.remove('show');
-  }, 2400);
-}
-
-// ===========================================================
-//  VIDEO RECORDING
-// ===========================================================
-
-/** Main handler for the Video button — toggles start/pause/stop */
+// ── Video ─────────────────────────────────────────────────────
 function handleVideoButton() {
-  if (isVideoProcessing) return; // wait for encoding
-
+  if (isVideoProcessing) return;
   if (!isVideoRecording) {
-    // START
-    startVideoRecording();
-  } else if (!isVideoPaused) {
-    // PAUSE
-    chrome.runtime.sendMessage({ type: 'PAUSE_VIDEO_RECORDING' }, (resp) => {
-      if (resp && resp.success) {
-        isVideoPaused = true;
-        updateVideoUI();
-        showToast('Video paused', 'info');
+    if (videoPreviewPanel) videoPreviewPanel.style.display = 'none';
+    videoDataUrl = null;
+    btnVideo.disabled = true; videoBtnLabel.textContent = '…';
+    chrome.runtime.sendMessage({ type: 'START_VIDEO_RECORDING' }, (resp) => {
+      btnVideo.disabled = false;
+      if (resp?.success) {
+        isVideoRecording = true; isVideoPaused = false;
+        updateVideoUI(); showToast('🔴 Video recording!', 'success');
+      } else {
+        showToast('Video error: ' + (resp?.error || '?'), 'error');
+        videoBtnLabel.textContent = 'Video'; btnVideo.classList.remove('recording');
       }
+    });
+  } else if (!isVideoPaused) {
+    chrome.runtime.sendMessage({ type: 'PAUSE_VIDEO_RECORDING' }, () => {
+      isVideoPaused = true; updateVideoUI(); showToast('Video paused','info');
     });
   } else {
-    // RESUME
-    chrome.runtime.sendMessage({ type: 'RESUME_VIDEO_RECORDING' }, (resp) => {
-      if (resp && resp.success) {
-        isVideoPaused = false;
-        updateVideoUI();
-        showToast('Video resumed', 'success');
-      }
+    chrome.runtime.sendMessage({ type: 'RESUME_VIDEO_RECORDING' }, () => {
+      isVideoPaused = false; updateVideoUI(); showToast('Video resumed','success');
     });
   }
-}
-
-function startVideoRecording() {
-  // Hide any stale preview
-  if (videoPreviewPanel) videoPreviewPanel.style.display = 'none';
-  videoDataUrl = null;
-
-  btnVideo.disabled = true;
-  videoBtnLabel.textContent = '...';
-
-  chrome.runtime.sendMessage({ type: 'START_VIDEO_RECORDING' }, (resp) => {
-    btnVideo.disabled = false;
-    if (resp && resp.success) {
-      isVideoRecording  = true;
-      isVideoPaused     = false;
-      isVideoProcessing = false;
-      updateVideoUI();
-      showToast('🔴 Video recording started!', 'success');
-    } else {
-      const err = resp ? resp.error : 'Unknown error';
-      showToast('Video error: ' + err, 'error');
-      videoBtnLabel.textContent = 'Video';
-      btnVideo.className = 'ctrl-btn video-btn';
-    }
-  });
 }
 
 function stopVideoRecording() {
-  chrome.runtime.sendMessage({ type: 'STOP_VIDEO_RECORDING' }, (resp) => {
-    if (resp && resp.success) {
-      isVideoRecording  = false;
-      isVideoProcessing = true; // show "processing" state while encoding
-      updateVideoUI();
-      showToast('⏳ Processing video...', 'info');
-    }
+  chrome.runtime.sendMessage({ type: 'STOP_VIDEO_RECORDING' }, () => {
+    isVideoProcessing = true; updateVideoUI(); showToast('⏳ Encoding…','info');
   });
 }
 
-/** Update video button appearance + badge based on current state */
 function updateVideoUI() {
   if (!btnVideo) return;
-
   if (isVideoProcessing) {
-    btnVideo.className           = 'ctrl-btn video-btn processing';
-    videoBtnLabel.textContent    = 'Processing…';
-    btnVideo.disabled            = true;
-    if (videoBadge) videoBadge.style.display = 'none';
-    return;
+    btnVideo.className = 'sec-btn video'; videoBtnLabel.textContent = 'Encoding…'; btnVideo.disabled = true;
+    if (videoBadgeEl) videoBadgeEl.style.display = 'none'; return;
   }
-
   btnVideo.disabled = false;
-
   if (!isVideoRecording) {
-    // Idle — show normal state
-    btnVideo.className        = 'ctrl-btn video-btn';
-    videoBtnLabel.textContent = 'Video';
-    if (videoBadge) videoBadge.style.display = 'none';
+    btnVideo.className = 'sec-btn video'; videoBtnLabel.textContent = 'Video';
+    if (videoBadgeEl) videoBadgeEl.style.display = 'none';
   } else if (isVideoPaused) {
-    // Paused — show resume option
-    btnVideo.className        = 'ctrl-btn video-btn recording';
-    videoBtnLabel.textContent = 'Resume';
-    if (videoBadge) {
-      videoBadge.style.display = 'flex';
-      videoBadge.querySelector('.video-chip').textContent = '⏸ VIDEO PAUSED';
-    }
+    btnVideo.className = 'sec-btn video recording'; videoBtnLabel.textContent = 'Resume';
+    if (videoBadgeEl) { videoBadgeEl.style.display = 'flex'; videoBadgeEl.querySelector('.video-chip').textContent = '⏸ PAUSED'; }
   } else {
-    // Recording — show stop option. Button click pauses first, long-press stops.
-    // We keep it simple: click = pause, a "Stop Video" button appears in badge
-    btnVideo.className        = 'ctrl-btn video-btn recording';
-    videoBtnLabel.textContent = 'Pause';
-    if (videoBadge) {
-      videoBadge.style.display = 'flex';
-      videoBadge.querySelector('.video-chip').textContent = '⏺ REC VIDEO';
-
-      // Make badge clickable to stop the recording
-      videoBadge.onclick = null;
-      videoBadge.style.cursor = 'pointer';
-      videoBadge.title = 'Click to stop video recording';
-      videoBadge.onclick = () => {
-        if (confirm('Stop video recording and save the video?')) {
-          stopVideoRecording();
-        }
-      };
+    btnVideo.className = 'sec-btn video recording'; videoBtnLabel.textContent = 'Pause';
+    if (videoBadgeEl) {
+      videoBadgeEl.style.display = 'flex';
+      const chip = videoBadgeEl.querySelector('.video-chip');
+      if (chip) chip.textContent = '⏺ REC';
+      videoBadgeEl.style.cursor = 'pointer';
+      videoBadgeEl.title = 'Click to stop video';
+      videoBadgeEl.onclick = () => { if (confirm('Stop and encode video?')) stopVideoRecording(); };
     }
   }
 }
 
-/** Render the video preview panel with player + download/discard */
-function showVideoPreview(dataUrl, byteSize) {
+function showVideoPreview(dataUrl, size) {
   if (!videoPreviewPanel || !videoPlayer) return;
-
-  // Set video source
   videoPlayer.src = dataUrl;
+  const sl = $('videoSizeLabel');
+  if (sl && size) sl.textContent = (size / (1024*1024)).toFixed(1) + ' MB';
 
-  // Show size label
-  const sizeLabel = $('videoSizeLabel');
-  if (sizeLabel && byteSize) {
-    const mb = (byteSize / (1024 * 1024)).toFixed(1);
-    sizeLabel.textContent = mb + ' MB';
-  }
-
-  // Wire up buttons (remove old listeners by cloning)
-  const oldDl      = $('btnVideoDownload');
-  const oldDiscard = $('btnVideoDiscard');
-  const newDl      = oldDl.cloneNode(true);
-  const newDiscard = oldDiscard.cloneNode(true);
-  oldDl.parentNode.replaceChild(newDl, oldDl);
-  oldDiscard.parentNode.replaceChild(newDiscard, oldDiscard);
-
+  const od = $('btnVideoDownload'), os = $('btnVideoDiscard');
+  const nd = od.cloneNode(true), ns = os.cloneNode(true);
+  od.parentNode.replaceChild(nd, od); os.parentNode.replaceChild(ns, os);
   $('btnVideoDownload').addEventListener('click', downloadVideo);
-  $('btnVideoDiscard').addEventListener('click', () => {
-    videoPreviewPanel.style.display = 'none';
-    videoPlayer.src = '';
-    videoDataUrl    = null;
-  });
-
+  $('btnVideoDiscard').addEventListener('click', () => { videoPreviewPanel.style.display='none'; videoPlayer.src=''; videoDataUrl=null; });
   videoPreviewPanel.style.display = 'block';
 }
 
 function downloadVideo() {
-  if (!videoDataUrl) { showToast('No video to download', 'error'); return; }
-  const name = sanitizeFilename(
-    (typeof scenarioName !== 'undefined' && scenarioName.value)
-      ? scenarioName.value
-      : 'recording'
-  );
+  if (!videoDataUrl) { showToast('No video','error'); return; }
   const ext = videoDataUrl.includes('video/mp4') ? 'mp4' : 'webm';
-  const a   = document.createElement('a');
-  a.href     = videoDataUrl;
-  a.download = `${name}-${Date.now()}.${ext}`;
-  a.click();
-  showToast('Video downloaded!', 'success');
+  const a = document.createElement('a');
+  a.href = videoDataUrl; a.download = `${sanitize(scenarioName?.value||'recording')}.${ext}`; a.click();
+  showToast('Video downloaded!','success');
 }
 
-// ===========================================================
-//  UTILS
-// ===========================================================
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+// ── Theme ─────────────────────────────────────────────────────
+function loadTheme() {
+  chrome.storage.local.get(['theme'], (r) => {
+    isDark = r.theme !== 'light';
+    applyTheme();
+  });
+}
+function toggleTheme() {
+  isDark = !isDark; applyTheme();
+  chrome.storage.local.set({ theme: isDark ? 'dark' : 'light' });
+  showToast(isDark ? '🌙 Dark mode' : '☀️ Light mode', 'info');
+}
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+  $('themeIcon').textContent = isDark ? '🌙' : '☀️';
 }
 
-function sanitizeFilename(name) {
-  return name.replace(/[^a-zA-Z0-9_\-]/g, '_').toLowerCase().slice(0, 50) || 'scenario';
+// ── Tabs ──────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-item').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    const active = p.id === `tab-${name}`;
+    p.classList.toggle('active', active); p.style.display = active ? 'flex' : 'none';
+  });
+  if (name === 'gherkin') updateGherkin();
+  if (name === 'export')  updateExportOutput();
+  if (name === 'saved')   loadSavedScenarios();
 }
+document.querySelectorAll('.tab-panel').forEach(p => {
+  p.style.display = p.classList.contains('active') ? 'flex' : 'none';
+});
+
+// ── Toast ─────────────────────────────────────────────────────
+let toastT;
+function showToast(msg, type = 'success') {
+  toast.textContent = msg; toast.className = `toast ${type} show`;
+  clearTimeout(toastT); toastT = setTimeout(() => toast.classList.remove('show'), 2600);
+}
+
+// ── Utils ─────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function sanitize(s) { return s.replace(/[^a-zA-Z0-9_\-]/g,'_').toLowerCase().slice(0,50)||'file'; }
+function downloadText(text, filename, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a'); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+window.markAsVariable = markAsVariable;

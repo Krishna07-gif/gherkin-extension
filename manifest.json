@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Gherkin Test Recorder",
-  "version": "1.0.0",
-  "description": "Record browser interactions and auto-generate Gherkin BDD test cases — no AI needed",
+  "version": "2.0.0",
+  "description": "Record browser interactions → Gherkin BDD tests + MP4 video. Zero AI. Zero dependencies.",
   "permissions": [
     "activeTab",
     "storage",
     "tabs",
     "scripting",
     "tabCapture",
-    "offscreen"
+    "offscreen",
+    "contextMenus"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {
