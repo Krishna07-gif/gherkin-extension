@@ -269,7 +269,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.isVideoPaused = false; broadcastUpdate(); sendResponse({ success: true });
     },
 
-    GET_VIDEO_STATE: () => sendResponse({ isVideoRecording: state.isVideoRecording, isVideoPaused: state.isVideoPaused })
+    GET_VIDEO_STATE: () => sendResponse({ isVideoRecording: state.isVideoRecording, isVideoPaused: state.isVideoPaused }),
+
+    RUN_SCENARIO: () => {
+      runScenarioInBackground(message.steps);
+      sendResponse({ success: true });
+    }
   };
 
   if (handlers[message.type]) { handlers[message.type](); } else { sendResponse({ error: 'Unknown: ' + message.type }); }
@@ -295,4 +300,213 @@ function broadcastUpdate() {
     isRecording: state.isRecording, isPaused: state.isPaused, startTime: state.startTime,
     isVideoRecording: state.isVideoRecording, isVideoPaused: state.isVideoPaused
   }).catch(() => {});
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  BACKGROUND RUNNER ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+let runnerState = { running: false, tabId: null };
+
+function waitForTabLoad(tabId) {
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    const interval = setInterval(() => {
+      chrome.tabs.get(tabId, tab => {
+        if (chrome.runtime.lastError) { clearInterval(interval); reject(new Error('Tab closed')); return; }
+        if (tab.status === 'complete') { clearInterval(interval); resolve(); }
+        if (++tries > 100) { clearInterval(interval); resolve(); } // timeout after 10s
+      });
+    }, 100);
+  });
+}
+
+function executeStepInTab(tabId, step) {
+  return new Promise((resolve, reject) => {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: function(s) {
+        function findElByLocators(locators) {
+          if (!locators || !locators.length) return null;
+          for (const loc of locators) {
+            try {
+              let el = null;
+              if (loc.startsWith('id=')) {
+                el = document.getElementById(loc.slice(3));
+              } else if (loc.startsWith('name=')) {
+                el = document.querySelector('[name="' + loc.slice(5) + '"]');
+              } else if (loc.startsWith('css=')) {
+                el = document.querySelector(loc.slice(4));
+              } else if (loc.startsWith('linkText=')) {
+                const txt = loc.slice(9);
+                el = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === txt) || null;
+              } else if (loc.startsWith('xpath=')) {
+                const res = document.evaluate(loc.slice(6), document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                el = res.singleNodeValue || null;
+              }
+              if (el) return el;
+            } catch(_) {}
+          }
+          return null;
+        }
+        function findEl(label, tag) {
+          if (!label) return null;
+          const esc = label.replace(/['\"\\]/g, '\\$&');
+          const tries = [
+            () => document.querySelector('[aria-label="' + esc + '"]'),
+            () => document.querySelector('[placeholder="' + esc + '"]'),
+            () => document.querySelector('[title="' + esc + '"]'),
+            () => document.querySelector('[name="' + esc + '"]'),
+            () => document.querySelector('[data-testid="' + esc + '"]'),
+            () => { const all=document.querySelectorAll(tag||'*'); for(const el of all){if(el.textContent.trim()===label)return el;} return null; },
+            () => { const all=document.querySelectorAll(tag||'*'); for(const el of all){if(el.textContent.trim().includes(label)&&el.children.length<=2)return el;} return null; },
+          ];
+          for(const t of tries){try{const el=t();if(el)return el;}catch(_){}}
+          return null;
+        }
+        function find(locators, label, tag) {
+          return findElByLocators(locators) || findEl(label, tag);
+        }
+        try {
+          if (s.type==='click') {
+            const el = find(s.locators, s.label, 'button,a,[role="button"],[role="link"],input[type="submit"]');
+            if (!el) return { pass:false, error:'Element not found: "' + s.label + '"' };
+            el.click();
+            return { pass:true, navigated: el.tagName==='A' || el.type==='submit' };
+          }
+          if (s.type==='input') {
+            const el = find(s.locators, s.label, 'input,textarea,[contenteditable]');
+            if (!el) return { pass:false, error:'Input not found: "' + s.label + '"' };
+            el.focus(); el.value = s.value||'';
+            el.dispatchEvent(new Event('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
+            return { pass:true };
+          }
+          if (s.type==='select') {
+            const el = find(s.locators, s.label, 'select')||document.querySelector('select');
+            if (!el) return { pass:false, error:'Select not found: "' + s.label + '"' };
+            const opts=Array.from(el.options||[]);
+            const opt=opts.find(o=>o.text.trim()===s.value||o.value===s.value);
+            if (!opt) return { pass:false, error:'Option "' + s.value + '" not found' };
+            el.value=opt.value; el.dispatchEvent(new Event('change',{bubbles:true}));
+            return { pass:true };
+          }
+          if (s.type==='checkbox') {
+            const el = find(s.locators, s.label, 'input[type="checkbox"]');
+            if (!el) return { pass:false, error:'Checkbox not found: "' + s.label + '"' };
+            if (el.checked!==s.checked) el.click();
+            return { pass:true };
+          }
+          if (s.type==='radio') {
+            const el = find(s.locators, s.label, 'input[type="radio"]');
+            if (!el) return { pass:false, error:'Radio not found: "' + s.label + '"' };
+            el.click(); return { pass:true };
+          }
+          if (s.type==='submit') {
+            const form=document.querySelector('form');
+            if (!form) return { pass:false, error:'No form found' };
+            const btn=form.querySelector('[type="submit"],button');
+            if (btn) { btn.click(); return {pass:true,navigated:true}; }
+            form.submit(); return {pass:true,navigated:true};
+          }
+          if (s.type==='assert') {
+            const found = document.body.innerText.includes(s.value)||document.body.innerHTML.includes(s.value);
+            return found ? {pass:true} : {pass:false, error:'"' + s.value + '" not found on page'};
+          }
+          if (s.type==='paste') {
+            const el = find(s.locators, s.label, 'input,textarea,[contenteditable]');
+            if (!el) return { pass:false, error:'Input not found for paste: "' + s.label + '"' };
+            el.focus(); el.value = (el.value||'') + (s.value||'');
+            el.dispatchEvent(new Event('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
+            return { pass:true };
+          }
+          return { pass:true, skipped:true };
+        } catch(e) { return { pass:false, error:e.message }; }
+      },
+      args: [step]
+    }, results => {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      const r = results?.[0]?.result;
+      if (!r) { reject(new Error('Script injection failed')); return; }
+      resolve(r);
+    });
+  });
+}
+
+function broadcastRunnerUpdate(payload) {
+  chrome.runtime.sendMessage({ type: 'RUNNER_UPDATE', ...payload }).catch(() => {});
+}
+
+async function runScenarioInBackground(steps) {
+  if (runnerState.running) return;
+  runnerState.running = true;
+
+  const navStep = steps.find(s => s.type === 'navigate');
+  if (!navStep) {
+    broadcastRunnerUpdate({ event: 'error', error: 'No navigation step found — cannot start' });
+    runnerState.running = false; return;
+  }
+
+  broadcastRunnerUpdate({ event: 'start', total: steps.length });
+
+  try {
+    const tab = await new Promise((res, rej) => {
+      chrome.tabs.create({ url: navStep.url, active: true }, t => {
+        if (chrome.runtime.lastError) { rej(new Error(chrome.runtime.lastError.message)); return; }
+        res(t);
+      });
+    });
+    runnerState.tabId = tab.id;
+    await waitForTabLoad(tab.id);
+
+    const navIdx = steps.indexOf(navStep);
+    broadcastRunnerUpdate({ event: 'step_result', index: navIdx, status: 'pass', time: 0, error: null });
+
+    let passCount = 1, failCount = 0, skipCount = 0;
+
+    for (let i = 0; i < steps.length; i++) {
+      if (i === navIdx) continue; // already reported navigate
+      const step = steps[i];
+      broadcastRunnerUpdate({ event: 'step_start', index: i });
+      const start = Date.now();
+
+      if (['navigate', 'scroll', 'hotkey'].includes(step.type)) {
+        const time = Date.now() - start;
+        broadcastRunnerUpdate({ event: 'step_result', index: i, status: 'skipped', time, error: null });
+        skipCount++;
+        broadcastRunnerUpdate({ event: 'stats', pass: passCount, fail: failCount, skip: skipCount, total: steps.length });
+        continue;
+      }
+
+      try {
+        const result = await executeStepInTab(runnerState.tabId, step);
+        const time = Date.now() - start;
+        if (result.pass) {
+          broadcastRunnerUpdate({ event: 'step_result', index: i, status: 'pass', time, error: null });
+          passCount++;
+          if (result.navigated) {
+            await new Promise(r => setTimeout(r, 800));
+            await waitForTabLoad(runnerState.tabId);
+          }
+        } else {
+          broadcastRunnerUpdate({ event: 'step_result', index: i, status: 'fail', time, error: result.error || 'Unknown error' });
+          failCount++;
+        }
+      } catch(e) {
+        const time = Date.now() - start;
+        broadcastRunnerUpdate({ event: 'step_result', index: i, status: 'fail', time, error: e.message });
+        failCount++;
+      }
+      broadcastRunnerUpdate({ event: 'stats', pass: passCount, fail: failCount, skip: skipCount, total: steps.length });
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    broadcastRunnerUpdate({ event: 'done', pass: passCount, fail: failCount, skip: skipCount });
+  } catch(e) {
+    broadcastRunnerUpdate({ event: 'error', error: e.message });
+  }
+
+  runnerState.running = false;
+  runnerState.tabId = null;
 }

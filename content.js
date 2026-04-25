@@ -12,6 +12,7 @@
   let scrollDebounce   = null;
   let lastScrollY = window.scrollY, lastScrollX = window.scrollX;
   let dragSourceLabel = '';
+  let dragSourceLocators = [];
 
   // Fetch initial state + settings
   chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, resp => {
@@ -225,6 +226,149 @@
     return el.getAttribute('contenteditable')==='true';
   }
 
+  // ════════════════════════════════════════════════════
+  //  LOCATOR CAPTURE — Selenium-IDE strategy (priority ordered)
+  // ════════════════════════════════════════════════════
+  function getLocators(el) {
+    if (!el || el === document.body || el === document.documentElement) return [];
+    const locators = [];
+
+    // ── 1. Test-ID attributes (highest priority — stable) ──
+    const testAttrs = ['data-testid','data-test-id','data-test','data-cy','data-qa','data-automation','data-e2e'];
+    for (const attr of testAttrs) {
+      const v = el.getAttribute(attr);
+      if (v) { locators.push(`css=[${attr}="${v}"]`); break; }
+    }
+
+    // ── 2. id ──
+    if (el.id && !/^\d/.test(el.id)) locators.push(`id=${el.id}`);
+
+    // ── 3. name ──
+    const name = el.getAttribute('name');
+    if (name) locators.push(`name=${name}`);
+
+    // ── 4. linkText (for anchors) ──
+    if (el.nodeName === 'A') {
+      const txt = (el.textContent||'').replace(/\s+/g,' ').trim();
+      if (txt) locators.push(`linkText=${txt}`);
+    }
+
+    // ── 5. Auto CSS selector ──
+    try {
+      const css = buildCssSelector(el);
+      if (css && document.querySelector(css) === el) locators.push(`css=${css}`);
+    } catch(_) {}
+
+    // ── 6. XPath: id-relative ──
+    try {
+      const xid = buildXPathIdRelative(el);
+      if (xid) locators.push(xid);
+    } catch(_) {}
+
+    // ── 7. XPath: attributes (id/name/value/type on element) ──
+    try {
+      const xatt = buildXPathAttributes(el);
+      if (xatt) locators.push(xatt);
+    } catch(_) {}
+
+    // ── 8. XPath: innerText / link text ──
+    try {
+      const tag = el.nodeName.toLowerCase();
+      const inner = (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,80);
+      if (inner && inner.length <= 80) {
+        const safe = inner.replace(/'/g,'"');
+        locators.push(`xpath=//${tag}[normalize-space(.)='${safe}']`);
+      }
+    } catch(_) {}
+
+    // ── 9. XPath: positional (full path — most stable fallback) ──
+    try {
+      const xpos = buildXPathPosition(el);
+      if (xpos) locators.push(xpos);
+    } catch(_) {}
+
+    return locators;
+  }
+
+  function buildCssSelector(el) {
+    if (el.id && !/^\d/.test(el.id)) return '#' + CSS.escape(el.id);
+    const parts = [];
+    let cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      let seg = cur.nodeName.toLowerCase();
+      if (cur.id && !/^\d/.test(cur.id)) { seg = '#' + CSS.escape(cur.id); parts.unshift(seg); break; }
+      const siblings = cur.parentElement ? Array.from(cur.parentElement.children).filter(c => c.nodeName === cur.nodeName) : [];
+      if (siblings.length > 1) seg += ':nth-of-type(' + (siblings.indexOf(cur) + 1) + ')';
+      // Prefer unique class if available
+      const classes = Array.from(cur.classList).filter(c => !c.match(/^(active|hover|focus|selected|disabled|is-|has-)/) && c.length < 30);
+      if (classes.length > 0 && cur.parentElement) {
+        const cls = classes[0];
+        const cand = cur.nodeName.toLowerCase() + '.' + CSS.escape(cls);
+        if (cur.parentElement.querySelectorAll(cand).length === 1) { seg = cand; }
+      }
+      parts.unshift(seg);
+      if (document.querySelector(parts.join(' > ')) === el) break;
+      cur = cur.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  function buildXPathIdRelative(el) {
+    let path = '';
+    let cur = el;
+    while (cur) {
+      if (cur.parentNode) {
+        path = xpathRelPart(cur) + path;
+        const par = cur.parentNode;
+        if (par.nodeType === 1 && par.getAttribute('id')) {
+          return `xpath=//${par.nodeName.toLowerCase()}[@id='${par.getAttribute('id')}']${path}`;
+        }
+      } else { return null; }
+      cur = cur.parentNode;
+      if (!cur || cur === document.documentElement) return null;
+    }
+    return null;
+  }
+
+  function buildXPathAttributes(el) {
+    const PREF = ['id','name','value','type'];
+    const tag = el.nodeName.toLowerCase();
+    for (const a of PREF) {
+      const v = el.getAttribute(a);
+      if (v) {
+        const xp = `//${tag}[@${a}='${v.replace(/'/g,'"')}']`;
+        try {
+          const res = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          if (res.singleNodeValue === el) return `xpath=${xp}`;
+        } catch(_) {}
+      }
+    }
+    return null;
+  }
+
+  function buildXPathPosition(el) {
+    let path = '';
+    let cur = el;
+    while (cur && cur !== document.documentElement) {
+      path = xpathRelPart(cur) + path;
+      const xp = '/' + path;
+      try {
+        const res = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        if (res.singleNodeValue === el) return `xpath=${xp}`;
+      } catch(_) {}
+      cur = cur.parentNode;
+    }
+    return null;
+  }
+
+  function xpathRelPart(el) {
+    const tag = el.nodeName.toLowerCase();
+    if (!el.parentNode) return '/' + tag;
+    const siblings = Array.from(el.parentNode.childNodes).filter(n => n.nodeName === el.nodeName);
+    const idx = siblings.indexOf(el);
+    return '/' + tag + (siblings.length > 1 ? '[' + (idx + 1) + ']' : '');
+  }
+
   function send(action) {
     if (!isRecording || isPaused) return;
     // Apply settings filter here too (belt-and-suspenders)
@@ -254,7 +398,7 @@
     const rect = el.getBoundingClientRect();
     if (rect.width===0 && rect.height===0) return;
     if (['BODY','HTML'].includes(el.tagName)) return;
-    send({ type:'click', elementType: getElType(el), label: getLabel(el), tag: el.tagName.toLowerCase(), checked: el.checked!==undefined ? el.checked : null });
+    send({ type:'click', elementType: getElType(el), label: getLabel(el), tag: el.tagName.toLowerCase(), checked: el.checked!==undefined ? el.checked : null, locators: getLocators(el) });
   }, true);
 
   // Input (debounced — uses settings.debounce)
@@ -264,12 +408,12 @@
     const label = getLabel(el), itype = (el.type||'text').toLowerCase();
     // Mask password based on settings.maskPass
     const value = (itype==='password' && settings.maskPass!==false) ? '••••••' : el.value;
-    pendingInputMap.set(el, { label, value, inputType: itype });
+    pendingInputMap.set(el, { label, value, inputType: itype, locators: getLocators(el) });
     clearTimeout(inputDebounceMap.get(el));
     const delay = settings.debounce || 1200;
     inputDebounceMap.set(el, setTimeout(() => {
       const p = pendingInputMap.get(el);
-      if (p?.value) send({ type:'input', elementType:'input', label:p.label, value:p.value, inputType:p.inputType });
+      if (p?.value) send({ type:'input', elementType:'input', label:p.label, value:p.value, inputType:p.inputType, locators:p.locators });
       inputDebounceMap.delete(el); pendingInputMap.delete(el);
     }, delay));
   }, true);
@@ -278,10 +422,10 @@
   document.addEventListener('change', e => {
     if (!isRecording||isPaused) return;
     const el = e.target, tag = el.tagName.toLowerCase(), type = (el.type||'').toLowerCase();
-    if (tag==='select') { const opt = el.options[el.selectedIndex]; send({ type:'select', elementType:'select', label:getLabel(el), value: opt?opt.text.trim():el.value }); }
-    else if (type==='checkbox') send({ type:'checkbox', elementType:'checkbox', label:getLabel(el), checked:el.checked });
-    else if (type==='radio')    send({ type:'radio', elementType:'radio', label:getLabel(el), value:getLabel(el) });
-    else if (type==='file') { const files = Array.from(el.files||[]).map(f=>f.name).join(', '); send({ type:'file', elementType:'file', label:getLabel(el), value:files||'selected file' }); }
+    if (tag==='select') { const opt = el.options[el.selectedIndex]; send({ type:'select', elementType:'select', label:getLabel(el), value: opt?opt.text.trim():el.value, locators:getLocators(el) }); }
+    else if (type==='checkbox') send({ type:'checkbox', elementType:'checkbox', label:getLabel(el), checked:el.checked, locators:getLocators(el) });
+    else if (type==='radio')    send({ type:'radio', elementType:'radio', label:getLabel(el), value:getLabel(el), locators:getLocators(el) });
+    else if (type==='file') { const files = Array.from(el.files||[]).map(f=>f.name).join(', '); send({ type:'file', elementType:'file', label:getLabel(el), value:files||'selected file', locators:getLocators(el) }); }
   }, true);
 
   // Submit
@@ -322,16 +466,16 @@
     if (!settings.rightClick) return;
     if (e.target.closest('#__gherkin_rec_overlay__')) return;
     const text = e.target.textContent.trim().slice(0,60); if (!text) return;
-    send({ type:'assert', elementType:'assertion', label:getLabel(e.target), value:text, fromRightClick:true });
+    send({ type:'assert', elementType:'assertion', label:getLabel(e.target), value:text, fromRightClick:true, locators:getLocators(e.target) });
   }, true);
 
   // Drag & drop
-  document.addEventListener('dragstart', e => { if (!isRecording||isPaused||e.target.closest('#__gherkin_rec_overlay__')) return; dragSourceLabel = getLabel(e.target); }, true);
+  document.addEventListener('dragstart', e => { if (!isRecording||isPaused||e.target.closest('#__gherkin_rec_overlay__')) return; dragSourceLabel = getLabel(e.target); dragSourceLocators = getLocators(e.target); }, true);
   document.addEventListener('drop', e => {
     if (!isRecording||isPaused) return;
     const target = getLabel(e.target);
-    if (dragSourceLabel && target) send({ type:'dragdrop', elementType:'dragdrop', label:dragSourceLabel, value:target });
-    dragSourceLabel = '';
+    if (dragSourceLabel && target) send({ type:'dragdrop', elementType:'dragdrop', label:dragSourceLabel, value:target, locators:dragSourceLocators, targetLocators:getLocators(e.target) });
+    dragSourceLabel = ''; dragSourceLocators = [];
   }, true);
 
   // Paste
@@ -339,7 +483,7 @@
     if (!isRecording||isPaused) return;
     const el = e.target; if (!isText(el)) return;
     const text = e.clipboardData?.getData('text')?.slice(0,80)||'clipboard content';
-    send({ type:'paste', elementType:'input', label:getLabel(el), value:text });
+    send({ type:'paste', elementType:'input', label:getLabel(el), value:text, locators:getLocators(el) });
   }, true);
 
 })();

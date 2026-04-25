@@ -97,6 +97,34 @@ async function loadState() {
 
 // ── Real-time updates ─────────────────────────────────────────
 chrome.runtime.onMessage.addListener(msg => {
+  // ── Background runner progress updates ───────────────────
+  if (msg.type === 'RUNNER_UPDATE') {
+    const { event } = msg;
+    if (event === 'step_start') {
+      addRunRow(msg.index, steps[msg.index], 'running', null, null);
+    } else if (event === 'step_result') {
+      const step = steps[msg.index];
+      if (!document.getElementById('run-row-' + msg.index)) addRunRow(msg.index, step, msg.status, msg.time, msg.error);
+      else updateRunRow(msg.index, msg.status, msg.time, msg.error);
+      runnerResults[msg.index] = { step, status: msg.status, time: msg.time, error: msg.error };
+    } else if (event === 'stats') {
+      updateRunStats(msg.pass, msg.fail, msg.skip, msg.total);
+    } else if (event === 'done') {
+      showToast('Done: ✅' + msg.pass + ' ❌' + msg.fail, msg.pass >= msg.fail ? 'success' : 'error');
+      $('btnRunScenario').disabled = false;
+      $('btnRunScenario').textContent = '▶ Run';
+      $('btnDownloadReport').style.display = 'inline-flex';
+      $('runInfo').style.display = 'block';
+      $('runProgress').style.display = 'none';
+    } else if (event === 'error') {
+      showToast('Runner error: ' + msg.error, 'error');
+      $('btnRunScenario').disabled = false;
+      $('btnRunScenario').textContent = '▶ Run';
+      $('runInfo').style.display = 'block';
+      $('runProgress').style.display = 'none';
+    }
+    return;
+  }
   if (msg.type === 'STATE_UPDATE') {
     const prev = steps.length; steps = msg.steps || [];
     isRecording = msg.isRecording; isPaused = msg.isPaused;
@@ -506,7 +534,7 @@ function exportAllScenarios() {
 //  SCRIPT RUNNER
 // ═══════════════════════════════════════════════════════════════
 
-async function runScenario() {
+function runScenario() {
   if (!steps.length) { showToast('No steps to run','error'); return; }
   const navStep = steps.find(s => s.type==='navigate');
   if (!navStep) { showToast('No navigation step found — cannot start','error'); return; }
@@ -520,82 +548,13 @@ async function runScenario() {
   $('runStepsList').innerHTML    = '';
   updateRunStats(0,0,0,steps.length);
 
-  // Open a new tab with the first URL
-  try {
-    const tab = await new Promise((res,rej) => {
-      chrome.tabs.create({ url: navStep.url, active: true }, t => {
-        if (chrome.runtime.lastError) { rej(new Error(chrome.runtime.lastError.message)); return; }
-        res(t);
-      });
-    });
-    runnerTabId = tab.id;
-
-    // Wait for tab to fully load
-    await waitForTabLoad(tab.id);
-
-    // Add navigate result
-    addRunRow(0, navStep, 'pass', 0, null);
-    runnerResults.push({ step:navStep, status:'pass', time:0 });
-
-    let passCount=1, failCount=0, skipCount=0;
-
-    // Execute remaining steps
-    for (let i=1; i<steps.length; i++) {
-      const step = steps[i];
-      addRunRow(i, step, 'running', null, null);
-      const start = Date.now();
-
-      // Skip non-executable step types
-      if (['navigate','scroll','hotkey'].includes(step.type)) {
-        const time = Date.now()-start;
-        updateRunRow(i,'skipped',time,null);
-        runnerResults.push({step,status:'skipped',time});
-        skipCount++;
-        updateRunStats(passCount,failCount,skipCount,steps.length);
-        continue;
-      }
-
-      try {
-        const result = await executeStepInTab(runnerTabId, step);
-        const time = Date.now()-start;
-        if (result.pass) {
-          updateRunRow(i,'pass',time,null); runnerResults.push({step,status:'pass',time}); passCount++;
-          if (result.navigated) { await new Promise(r=>setTimeout(r,800)); await waitForTabLoad(runnerTabId); }
-        } else {
-          updateRunRow(i,'fail',time,result.error||'Unknown error');
-          runnerResults.push({step,status:'fail',time,error:result.error}); failCount++;
-        }
-      } catch(e) {
-        const time = Date.now()-start;
-        updateRunRow(i,'fail',time,e.message);
-        runnerResults.push({step,status:'fail',time,error:e.message}); failCount++;
-      }
-      updateRunStats(passCount,failCount,skipCount,steps.length);
-      await new Promise(r=>setTimeout(r,300));
+  // Delegate ALL execution to background.js service worker (stays alive when popup loses focus)
+  chrome.runtime.sendMessage({ type: 'RUN_SCENARIO', steps }, () => {
+    if (chrome.runtime.lastError) {
+      showToast('Runner error: ' + chrome.runtime.lastError.message, 'error');
+      $('btnRunScenario').disabled = false;
+      $('btnRunScenario').textContent = '▶ Run';
     }
-
-    showToast(`Done: ✅${passCount} ❌${failCount}`, passCount>failCount?'success':'error');
-  } catch(e) {
-    showToast('Runner error: '+e.message,'error');
-    $('runInfo').style.display='block'; $('runProgress').style.display='none';
-  }
-
-  $('btnRunScenario').disabled=false;
-  $('btnRunScenario').textContent='▶ Run';
-  $('btnDownloadReport').style.display='inline-flex';
-  runnerTabId = null;
-}
-
-function waitForTabLoad(tabId) {
-  return new Promise((resolve, reject) => {
-    let tries = 0;
-    const interval = setInterval(() => {
-      chrome.tabs.get(tabId, tab => {
-        if (chrome.runtime.lastError) { clearInterval(interval); reject(new Error('Tab closed')); return; }
-        if (tab.status === 'complete') { clearInterval(interval); resolve(); }
-        if (++tries > 60) { clearInterval(interval); resolve(); } // timeout after 6s
-      });
-    }, 100);
   });
 }
 
@@ -605,9 +564,34 @@ function executeStepInTab(tabId, step) {
     chrome.scripting.executeScript({
       target: { tabId },
       func: function(s) {
+        // ── Locator-first finder (Selenium IDE strategy) ──────────────
+        function findElByLocators(locators) {
+          if (!locators || !locators.length) return null;
+          for (const loc of locators) {
+            try {
+              let el = null;
+              if (loc.startsWith('id=')) {
+                el = document.getElementById(loc.slice(3));
+              } else if (loc.startsWith('name=')) {
+                el = document.querySelector('[name="' + loc.slice(5) + '"]');
+              } else if (loc.startsWith('css=')) {
+                el = document.querySelector(loc.slice(4));
+              } else if (loc.startsWith('linkText=')) {
+                const txt = loc.slice(9);
+                el = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === txt) || null;
+              } else if (loc.startsWith('xpath=')) {
+                const res = document.evaluate(loc.slice(6), document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                el = res.singleNodeValue || null;
+              }
+              if (el) return el;
+            } catch(_) {}
+          }
+          return null;
+        }
+        // ── Label-based fallback (original approach) ──────────────────
         function findEl(label, tag) {
           if (!label) return null;
-          const esc = label.replace(/['"\\]/g, '\\$&');
+          const esc = label.replace(/['\"\\]/g, '\\$&');
           const tries = [
             () => document.querySelector(`[aria-label="${esc}"]`),
             () => document.querySelector(`[placeholder="${esc}"]`),
@@ -620,15 +604,19 @@ function executeStepInTab(tabId, step) {
           for(const t of tries){try{const el=t();if(el)return el;}catch(_){}}
           return null;
         }
+        // ── Unified find: locators first, label fallback ──────────────
+        function find(locators, label, tag) {
+          return findElByLocators(locators) || findEl(label, tag);
+        }
         try {
           if (s.type==='click') {
-            const el = findEl(s.label, 'button,a,[role="button"],[role="link"],input[type="submit"]');
+            const el = find(s.locators, s.label, 'button,a,[role="button"],[role="link"],input[type="submit"]');
             if (!el) return { pass:false, error:`Element not found: "${s.label}"` };
             el.click();
             return { pass:true, navigated: el.tagName==='A' || el.type==='submit' };
           }
           if (s.type==='input') {
-            const el = findEl(s.label, 'input,textarea,[contenteditable]');
+            const el = find(s.locators, s.label, 'input,textarea,[contenteditable]');
             if (!el) return { pass:false, error:`Input not found: "${s.label}"` };
             el.focus(); el.value = s.value||'';
             el.dispatchEvent(new Event('input',{bubbles:true}));
@@ -636,7 +624,7 @@ function executeStepInTab(tabId, step) {
             return { pass:true };
           }
           if (s.type==='select') {
-            const el = findEl(s.label, 'select')||document.querySelector('select');
+            const el = find(s.locators, s.label, 'select')||document.querySelector('select');
             if (!el) return { pass:false, error:`Select not found: "${s.label}"` };
             const opts=Array.from(el.options||[]);
             const opt=opts.find(o=>o.text.trim()===s.value||o.value===s.value);
@@ -645,10 +633,15 @@ function executeStepInTab(tabId, step) {
             return { pass:true };
           }
           if (s.type==='checkbox') {
-            const el = findEl(s.label, 'input[type="checkbox"]');
+            const el = find(s.locators, s.label, 'input[type="checkbox"]');
             if (!el) return { pass:false, error:`Checkbox not found: "${s.label}"` };
             if (el.checked!==s.checked) el.click();
             return { pass:true };
+          }
+          if (s.type==='radio') {
+            const el = find(s.locators, s.label, 'input[type="radio"]');
+            if (!el) return {pass:false, error:`Radio not found: "${s.label}"`};
+            el.click(); return {pass:true};
           }
           if (s.type==='submit') {
             const form=document.querySelector('form');
@@ -661,10 +654,13 @@ function executeStepInTab(tabId, step) {
             const found = document.body.innerText.includes(s.value)||document.body.innerHTML.includes(s.value);
             return found ? {pass:true} : {pass:false, error:`"${s.value}" not found on page`};
           }
-          if (s.type==='radio') {
-            const el=findEl(s.label,'input[type="radio"]');
-            if (!el) return {pass:false,error:`Radio not found: "${s.label}"`};
-            el.click(); return {pass:true};
+          if (s.type==='paste') {
+            const el = find(s.locators, s.label, 'input,textarea,[contenteditable]');
+            if (!el) return { pass:false, error:`Input not found for paste: "${s.label}"` };
+            el.focus(); el.value = (el.value||'') + (s.value||'');
+            el.dispatchEvent(new Event('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
+            return { pass:true };
           }
           return { pass:true, skipped:true };
         } catch(e) { return { pass:false, error:e.message }; }
