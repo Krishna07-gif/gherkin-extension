@@ -63,6 +63,7 @@
       <span>🎬 Recorded Session</span>
       <div style="display:flex;align-items:center;gap:6px">
         <span class="video-size-label" id="videoSizeLabel"></span>
+        <button class="pill-btn" id="btnVideoMaximize" title="Open in new window">⛶</button>
         <button class="pill-btn" id="btnVideoDownload">💾 Download</button>
         <button class="icon-only-btn" id="btnVideoDiscard">✕</button>
       </div>
@@ -83,6 +84,9 @@
     </button>
     <button class="tab-item" data-tab="saved">
       <span class="tab-icon">💾</span><span class="tab-label">Saved</span>
+    </button>
+    <button class="tab-item" data-tab="run">
+      <span class="tab-icon">▶️</span><span class="tab-label">Run</span>
     </button>
     <button class="tab-item" data-tab="settings">
       <span class="tab-icon">⚙️</span><span class="tab-label">Settings</span>
@@ -191,6 +195,32 @@
         <p class="empty-title">No Saved Scenarios</p>
         <p class="empty-desc">Record and save scenarios here for later use or export.</p>
       </div>
+    </div>
+  </div>
+
+  <!-- ── TAB: RUN ────────────────────────────────────────── -->
+  <div class="tab-panel" id="tab-run">
+    <div class="run-header">
+      <span class="output-title">Script Runner</span>
+      <div class="output-actions">
+        <button class="pill-btn accent" id="btnRunScenario">▶ Run</button>
+        <button class="pill-btn" id="btnDownloadReport" style="display:none">📥 Report</button>
+      </div>
+    </div>
+    <div class="run-info" id="runInfo">
+      <div class="run-desc-box">
+        <p class="run-desc">Replays your recorded steps in a new tab and reports pass / fail for each one.</p>
+        <p class="run-warn">⚠️ Keep this popup open during execution. Results may vary on dynamic pages.</p>
+      </div>
+    </div>
+    <div class="run-progress" id="runProgress" style="display:none">
+      <div class="run-stats-bar">
+        <span class="run-stat run-pass-stat" id="runPassCount">✅ 0</span>
+        <span class="run-stat run-fail-stat" id="runFailCount">❌ 0</span>
+        <span class="run-stat run-skip-stat" id="runSkipCount">⏭ 0</span>
+        <span class="run-stat" id="runTotalCount" style="margin-left:auto">0 steps</span>
+      </div>
+      <div class="run-steps-list" id="runStepsList"></div>
     </div>
   </div>
 

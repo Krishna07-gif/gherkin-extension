@@ -1,10 +1,28 @@
-// background.js — Service Worker v2
+// background.js — Service Worker v3 (all bugs fixed)
 'use strict';
+
+const DEFAULT_SETTINGS = {
+  screenshots: true, scrolls: false, hotkeys: false,
+  rightClick: true, maskPass: true, debounce: 1200
+};
 
 let state = {
   isRecording: false, isPaused: false, tabId: null, startTime: null,
-  steps: [], isVideoRecording: false, isVideoPaused: false, videoTabId: null
+  steps: [], settings: { ...DEFAULT_SETTINGS },
+  isVideoRecording: false, isVideoPaused: false, videoTabId: null,
+  pendingVideoData: null  // stores VIDEO_READY data across popup open/close
 };
+
+// ── Load settings at startup ──────────────────────────────
+async function loadSettingsFromStorage() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(['settings'], r => {
+      if (r.settings) state.settings = { ...DEFAULT_SETTINGS, ...r.settings };
+      resolve(state.settings);
+    });
+  });
+}
+loadSettingsFromStorage();
 
 // ── Navigation tracking ───────────────────────────────────
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -17,44 +35,32 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-chrome.tabs.onActivated.addListener((info) => {
+chrome.tabs.onActivated.addListener(info => {
   if (state.isRecording) state.tabId = info.tabId;
 });
 
 // ── Context menus ─────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'gherkin-assert',
-    title: '✅ Add assertion: "%s"',
-    contexts: ['selection']
-  });
-  chrome.contextMenus.create({
-    id: 'gherkin-start',
-    title: '🔴 Start Gherkin Recording',
-    contexts: ['page']
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: 'gherkin-assert', title: '✅ Add assertion: "%s"', contexts: ['selection'] });
+    chrome.contextMenus.create({ id: 'gherkin-start',  title: '🔴 Start Gherkin Recording', contexts: ['page'] });
   });
 });
-
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === 'gherkin-assert' && info.selectionText) {
-    if (state.isRecording && !state.isPaused) {
-      addStep({ type: 'assert', elementType: 'assertion',
-                label: info.selectionText.slice(0, 60),
-                value: info.selectionText.slice(0, 60), timestamp: Date.now() });
-    }
+  if (info.menuItemId === 'gherkin-assert' && info.selectionText && state.isRecording && !state.isPaused) {
+    addStep({ type: 'assert', elementType: 'assertion', label: info.selectionText.slice(0,60),
+              value: info.selectionText.slice(0,60), timestamp: Date.now() });
   }
-  if (info.menuItemId === 'gherkin-start') {
-    startRecordingOnTab(tab.id, tab.url);
-  }
+  if (info.menuItemId === 'gherkin-start') startRecordingOnTab(tab.id, tab.url);
 });
 
 // ── Offscreen helpers ─────────────────────────────────────
 async function ensureOffscreenDocument() {
   const ctxs = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }).catch(() => []);
-  if (ctxs?.length > 0) return;
+  if (ctxs?.length) return;
   await chrome.offscreen.createDocument({
     url: chrome.runtime.getURL('offscreen.html'), reasons: ['USER_MEDIA'],
-    justification: 'Tab capture for video recording'
+    justification: 'Tab capture for video'
   });
 }
 async function closeOffscreenDocument() {
@@ -63,54 +69,81 @@ async function closeOffscreenDocument() {
   await chrome.offscreen.closeDocument().catch(() => {});
 }
 
-// ── Screenshot capture ────────────────────────────────────
+// ── Screenshot (respects settings) ───────────────────────
 function captureScreenshot() {
-  return new Promise((resolve) => {
-    if (!state.tabId) { resolve(null); return; }
-    chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 25 }, (dataUrl) => {
-      if (chrome.runtime.lastError) { resolve(null); return; }
-      resolve(dataUrl || null);
+  return new Promise(resolve => {
+    if (!state.tabId || state.settings.screenshots === false) { resolve(null); return; }
+    chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 30 }, dataUrl => {
+      resolve(chrome.runtime.lastError ? null : (dataUrl || null));
+    });
+  });
+}
+
+// ── Settings helper ───────────────────────────────────────
+function getSettings() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(['settings'], r => {
+      const merged = { ...DEFAULT_SETTINGS, ...(r.settings || {}) };
+      state.settings = merged;
+      resolve(merged);
     });
   });
 }
 
 // ── Message handler ───────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  // Relay VIDEO_READY from offscreen → popup (and store in state for popup reopen)
   if (message.type === 'VIDEO_READY') {
     state.isVideoRecording = false; state.isVideoPaused = false;
-    chrome.runtime.sendMessage({ type: 'VIDEO_READY', dataUrl: message.dataUrl,
-                                  mimeType: message.mimeType, size: message.size }).catch(() => {});
+    state.pendingVideoData = { dataUrl: message.dataUrl, mimeType: message.mimeType, size: message.size };
+    chrome.runtime.sendMessage({ type: 'VIDEO_READY', ...state.pendingVideoData }).catch(() => {});
     closeOffscreenDocument(); broadcastUpdate(); return true;
   }
 
   const handlers = {
-    GET_STATE: () => sendResponse({ ...state }),
+    GET_STATE: () => {
+      // Include pendingVideoData so popup can retrieve video after reopen
+      sendResponse({ ...state, pendingVideoData: state.pendingVideoData });
+    },
 
     GET_RECORDING_STATE: () => sendResponse({ isRecording: state.isRecording && !state.isPaused }),
 
-    START_RECORDING: () => {
+    CLEAR_PENDING_VIDEO: () => { state.pendingVideoData = null; sendResponse({ success: true }); },
+
+    START_RECORDING: async () => {
+      const settings = await getSettings();
       state.steps = []; state.isRecording = true; state.isPaused = false; state.startTime = Date.now();
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
         if (!tabs[0]) return;
         state.tabId = tabs[0].id;
         chrome.scripting.executeScript({ target: { tabId: tabs[0].id }, files: ['content.js'] }).catch(() => {});
-        if (tabs[0].url && !tabs[0].url.startsWith('chrome')) {
+        if (tabs[0].url && !tabs[0].url.startsWith('chrome'))
           addStep({ type: 'navigate', url: tabs[0].url, timestamp: Date.now() });
-        }
-        chrome.tabs.sendMessage(tabs[0].id, { type: 'SET_RECORDING_STATE', isRecording: true }).catch(() => {});
+        // Pass settings AND signal to show overlay
+        chrome.tabs.sendMessage(tabs[0].id, {
+          type: 'SET_RECORDING_STATE', isRecording: true, settings
+        }).catch(() => {});
       });
       sendResponse({ success: true });
     },
 
     STOP_RECORDING: () => {
       state.isRecording = false; state.isPaused = false;
-      if (state.tabId) chrome.tabs.sendMessage(state.tabId, { type: 'SET_RECORDING_STATE', isRecording: false }).catch(() => {});
+      if (state.tabId) {
+        chrome.tabs.sendMessage(state.tabId, { type: 'SET_RECORDING_STATE', isRecording: false }).catch(() => {});
+      }
       sendResponse({ success: true, steps: state.steps });
     },
 
     PAUSE_RECORDING: () => {
       state.isPaused = !state.isPaused;
-      if (state.tabId) chrome.tabs.sendMessage(state.tabId, { type: 'SET_RECORDING_STATE', isRecording: state.isRecording && !state.isPaused }).catch(() => {});
+      if (state.tabId) {
+        chrome.tabs.sendMessage(state.tabId, {
+          type: 'SET_RECORDING_STATE', isRecording: state.isRecording && !state.isPaused,
+          isPaused: state.isPaused, settings: state.settings
+        }).catch(() => {});
+      }
       sendResponse({ isPaused: state.isPaused });
     },
 
@@ -121,8 +154,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     RECORD_ACTION: async () => {
       if (!state.isRecording || state.isPaused) { sendResponse({ ignored: true }); return; }
-      // Capture screenshot for non-navigate steps
-      const screenshot = (message.action.type !== 'navigate') ? await captureScreenshot() : null;
+      const settings = state.settings;
+      // Skip hotkeys if disabled
+      if (message.action.type === 'hotkey' && settings.hotkeys === false) { sendResponse({ ignored: true }); return; }
+      // Skip scroll if disabled
+      if (message.action.type === 'scroll' && settings.scrolls === false) { sendResponse({ ignored: true }); return; }
+      // Skip assert from right-click if disabled
+      if (message.action.type === 'assert' && message.action.fromRightClick && settings.rightClick === false) { sendResponse({ ignored: true }); return; }
+      // Screenshot (respects settings.screenshots)
+      const screenshot = (message.action.type !== 'navigate' && settings.screenshots !== false)
+        ? await captureScreenshot() : null;
       addStep({ ...message.action, screenshot });
       sendResponse({ success: true });
     },
@@ -137,8 +178,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     REORDER_STEP: () => {
       const { from, to } = message;
       if (from >= 0 && to >= 0 && from < state.steps.length && to < state.steps.length) {
-        const [moved] = state.steps.splice(from, 1);
-        state.steps.splice(to, 0, moved);
+        const [moved] = state.steps.splice(from, 1); state.steps.splice(to, 0, moved);
         broadcastUpdate(); sendResponse({ success: true, steps: state.steps });
       } else sendResponse({ success: false });
     },
@@ -160,47 +200,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     SAVE_SCENARIO: () => {
       const { scenario } = message;
-      chrome.storage.local.get(['scenarios'], (r) => {
+      chrome.storage.local.get(['scenarios'], r => {
         const scenarios = r.scenarios || [];
-        // Strip screenshots before saving (save storage space)
         const cleanSteps = (scenario.steps || []).map(s => { const c = {...s}; delete c.screenshot; return c; });
         scenarios.push({ ...scenario, steps: cleanSteps, id: Date.now() });
         chrome.storage.local.set({ scenarios }, () => sendResponse({ success: true, scenarios }));
       });
     },
 
-    GET_SCENARIOS: () => {
-      chrome.storage.local.get(['scenarios'], (r) => sendResponse({ scenarios: r.scenarios || [] }));
-    },
+    GET_SCENARIOS: () => chrome.storage.local.get(['scenarios'], r => sendResponse({ scenarios: r.scenarios || [] })),
 
     DELETE_SCENARIO: () => {
-      chrome.storage.local.get(['scenarios'], (r) => {
+      chrome.storage.local.get(['scenarios'], r => {
         const scenarios = (r.scenarios || []).filter(s => s.id !== message.id);
         chrome.storage.local.set({ scenarios }, () => sendResponse({ success: true, scenarios }));
       });
     },
 
-    // ── Video ──────────────────────────────────────────────
+    // ── Settings ─────────────────────────────────────────
+    SAVE_SETTINGS: () => {
+      state.settings = { ...DEFAULT_SETTINGS, ...message.settings };
+      chrome.storage.local.set({ settings: state.settings }, () => {
+        // Notify active content script immediately so mask-password etc. work live
+        if (state.tabId) {
+          chrome.tabs.sendMessage(state.tabId, { type: 'UPDATE_SETTINGS', settings: state.settings }).catch(() => {});
+        }
+        sendResponse({ success: true });
+      });
+    },
+
+    GET_SETTINGS: () => chrome.storage.local.get(['settings'], r => sendResponse({ settings: { ...DEFAULT_SETTINGS, ...(r.settings || {}) } })),
+
+    // ── Video ─────────────────────────────────────────────
     START_VIDEO_RECORDING: async () => {
       try {
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        const tab  = tabs[0];
+        const tab = tabs[0];
         if (!tab) { sendResponse({ success: false, error: 'No active tab' }); return; }
-        chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }, async (streamId) => {
+        chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }, async streamId => {
           if (chrome.runtime.lastError) { sendResponse({ success: false, error: chrome.runtime.lastError.message }); return; }
           try {
             await ensureOffscreenDocument();
             await new Promise(r => setTimeout(r, 300));
             await chrome.runtime.sendMessage({ type: 'START_VIDEO', target: 'offscreen', streamId });
             state.isVideoRecording = true; state.isVideoPaused = false; state.videoTabId = tab.id;
+            state.pendingVideoData = null;
+            // Persist to local storage so popup can detect across restarts
+            chrome.storage.local.set({ videoRecordingActive: true });
             broadcastUpdate(); sendResponse({ success: true });
-          } catch (e) { await closeOffscreenDocument(); sendResponse({ success: false, error: e.message }); }
+          } catch(e) { await closeOffscreenDocument(); sendResponse({ success: false, error: e.message }); }
         });
-      } catch (e) { sendResponse({ success: false, error: e.message }); }
+      } catch(e) { sendResponse({ success: false, error: e.message }); }
     },
 
     STOP_VIDEO_RECORDING: () => {
       chrome.runtime.sendMessage({ type: 'STOP_VIDEO', target: 'offscreen' }).catch(() => {});
+      chrome.storage.local.remove('videoRecordingActive');
       sendResponse({ success: true });
     },
 
@@ -214,29 +269,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.isVideoPaused = false; broadcastUpdate(); sendResponse({ success: true });
     },
 
-    GET_VIDEO_STATE: () => sendResponse({ isVideoRecording: state.isVideoRecording, isVideoPaused: state.isVideoPaused }),
-
-    // ── Settings storage ───────────────────────────────────
-    SAVE_SETTINGS: () => {
-      chrome.storage.local.set({ settings: message.settings }, () => sendResponse({ success: true }));
-    },
-    GET_SETTINGS: () => {
-      chrome.storage.local.get(['settings'], (r) => sendResponse({ settings: r.settings || {} }));
-    }
+    GET_VIDEO_STATE: () => sendResponse({ isVideoRecording: state.isVideoRecording, isVideoPaused: state.isVideoPaused })
   };
 
-  if (handlers[message.type]) { handlers[message.type](); }
-  else sendResponse({ error: 'Unknown: ' + message.type });
+  if (handlers[message.type]) { handlers[message.type](); } else { sendResponse({ error: 'Unknown: ' + message.type }); }
   return true;
 });
 
 function startRecordingOnTab(tabId, url) {
-  state.steps = []; state.isRecording = true; state.isPaused = false;
-  state.startTime = Date.now(); state.tabId = tabId;
-  chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
-  if (url && !url.startsWith('chrome')) addStep({ type: 'navigate', url, timestamp: Date.now() });
-  chrome.tabs.sendMessage(tabId, { type: 'SET_RECORDING_STATE', isRecording: true }).catch(() => {});
-  broadcastUpdate();
+  loadSettingsFromStorage().then(settings => {
+    state.steps = []; state.isRecording = true; state.isPaused = false;
+    state.startTime = Date.now(); state.tabId = tabId;
+    chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+    if (url && !url.startsWith('chrome')) addStep({ type: 'navigate', url, timestamp: Date.now() });
+    chrome.tabs.sendMessage(tabId, { type: 'SET_RECORDING_STATE', isRecording: true, settings }).catch(() => {});
+    broadcastUpdate();
+  });
 }
 
 function addStep(step) { state.steps.push(step); broadcastUpdate(); }
